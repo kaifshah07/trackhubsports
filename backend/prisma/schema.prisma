@@ -1,0 +1,156 @@
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum Role {
+  SUPER_ADMIN
+  ADMIN
+  VENDOR
+  FRANCHISE
+  CUSTOMER
+}
+
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  SHIPPED
+  DELIVERED
+  CANCELLED
+}
+
+model User {
+  id           String    @id @default(uuid())
+  email        String    @unique
+  passwordHash String?
+  fullName     String
+  phone        String?
+  role         Role      @default(CUSTOMER)
+  isVerified   Boolean   @default(false)
+  otpCode      String?
+  otpExpiresAt DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  products     Product[]
+  orders       Order[]
+  cartItems    CartItem[]
+  franchise    FranchiseInquiry?
+}
+
+model Category {
+  id            String        @id @default(uuid())
+  name          String        @unique
+  subCategories SubCategory[]
+  products      Product[]
+  createdAt     DateTime      @default(now())
+}
+
+model SubCategory {
+  id         String    @id @default(uuid())
+  name       String
+  categoryId String
+  category   Category  @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  products   Product[]
+  createdAt  DateTime  @default(now())
+}
+
+model Product {
+  id            String       @id @default(uuid())
+  name          String
+  description   String?
+  price         Float
+  salePrice     Float?       
+  stock         Int          @default(0)
+  imageUrl          String       // Stores uploaded Base64 or image URL
+  secondaryImageUrl String?      // Optional secondary / back-side product image
+  colors        String[]     // e.g. ["Black", "White", "Navy Blue"]
+  sizes         String[]     // e.g. ["S", "M", "L", "XL", "XXL"]
+  isApproved    Boolean      @default(true)
+  
+  vendorId      String?
+  vendor        User?        @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+
+  categoryId    String
+  category      Category     @relation(fields: [categoryId], references: [id])
+
+  subCategoryId String?
+  subCategory   SubCategory? @relation(fields: [subCategoryId], references: [id])
+
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  cartItems     CartItem[]
+  orderItems    OrderItem[]
+}
+
+model FranchiseInquiry {
+  id          String   @id @default(uuid())
+  fullName    String
+  email       String   @unique
+  phone       String
+  city        String
+  investment  String
+  message     String?
+  status      String   @default("PENDING")  
+  createdAt   DateTime @default(now())
+  userId      String?  @unique
+  user        User?    @relation(fields: [userId], references: [id])
+}
+
+model Order {
+  id              String      @id @default(uuid())
+  userId          String
+  user            User        @relation(fields: [userId], references: [id])
+  totalAmount     Float
+  paymentId       String?
+  paymentMode     String      @default("RAZORPAY")
+  status          OrderStatus @default(CONFIRMED)
+  shippingAddress Json
+  createdAt       DateTime    @default(now())
+  orderItems      OrderItem[]
+}
+
+model OrderItem {
+  id        String  @id @default(uuid())
+  orderId   String
+  order     Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+  quantity  Int
+  price     Float
+}
+
+model CartItem {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  quantity  Int      @default(1)
+  size      String?
+  color     String?
+  createdAt DateTime @default(now())
+}
+
+model Coupon {
+  id          String   @id @default(uuid())
+  code        String   @unique
+  discountPct Float    
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+}
+
+model Banner {
+  id        String   @id @default(uuid())
+  title     String
+  imageUrl  String
+  linkUrl   String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+}
