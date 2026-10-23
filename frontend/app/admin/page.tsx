@@ -256,8 +256,8 @@ export default function AdminPage() {
       setError('Unsupported format. Please select a JPEG, PNG, or WebP image.');
       return;
     }
-    if (file.size > 5 * 1024 * 1024) {
-      setError('Image size exceeds the 5 MB limit.');
+    if (file.size > 25 * 1024 * 1024) {
+      setError('Image size exceeds the 25 MB limit.');
       return;
     }
 

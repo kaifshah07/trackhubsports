@@ -50,7 +50,7 @@ app.use(express.json({
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 5 * 1024 * 1024 // 5 MB limit
+    fileSize: 25 * 1024 * 1024 // 25 MB limit
   },
   fileFilter: (req, file, cb) => {
     const allowedExts = ['.jpg', '.jpeg', '.png', '.webp'];
@@ -561,7 +561,7 @@ app.post('/api/admin/upload-image', verifyToken, requireAdminOrSuper, (req: Auth
   upload.single('image')(req, res, async (err: any) => {
     if (err) {
       if (err.code === 'LIMIT_FILE_SIZE') {
-        return res.status(400).json({ success: false, error: 'Image size exceeds 5 MB limit.' });
+        return res.status(400).json({ success: false, error: 'Image size exceeds 25 MB limit.' });
       }
       if (err.message === 'INVALID_FILE_TYPE') {
         return res.status(400).json({
