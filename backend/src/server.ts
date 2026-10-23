@@ -660,10 +660,43 @@ app.post('/api/admin/products', verifyToken, requireAdminOrSuper, async (req: Au
 
 app.delete('/api/admin/products/:id', verifyToken, requireAdminOrSuper, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    await prisma.product.delete({ where: { id: req.params.id } });
-    res.json({ success: true, message: "Product deleted." });
+    const { id } = req.params;
+    if (!id || typeof id !== 'string') {
+      return res.status(400).json({ success: false, error: "Valid product ID is required." });
+    }
+
+    const productId = id.trim();
+    const existing = await prisma.product.findUnique({ where: { id: productId } });
+    if (!existing) {
+      return res.status(404).json({ success: false, error: "Product not found." });
+    }
+
+    await prisma.$transaction(async (tx) => {
+      // 1. Remove all cart entries containing this product
+      await tx.cartItem.deleteMany({ where: { productId } });
+
+      // 2. Remove all order items containing this product
+      await tx.orderItem.deleteMany({ where: { productId } });
+
+      // 3. Remove any orders that are now left completely empty without items
+      const emptyOrders = await tx.order.findMany({
+        where: { orderItems: { none: {} } },
+        select: { id: true }
+      });
+      if (emptyOrders.length > 0) {
+        await tx.order.deleteMany({
+          where: { id: { in: emptyOrders.map(o => o.id) } }
+        });
+      }
+
+      // 4. Delete the product itself
+      await tx.product.delete({ where: { id: productId } });
+    });
+
+    res.json({ success: true, message: "Product deleted successfully." });
   } catch (error: any) {
-    res.status(500).json({ success: false, error: error.message });
+    console.error("Product deletion error:", error);
+    res.status(500).json({ success: false, error: error.message || "Failed to delete product." });
   }
 });
 
