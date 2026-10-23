@@ -8,7 +8,7 @@ import ProductCard, { Product } from '../components/ProductCard';
 
 const standardCategories = [
   'T-Shirt',
-  'Round Neck T-Shirt',
+  'Cap',
   'Polo',
   'Shorts',
   'Cut Sleeves',
@@ -20,7 +20,7 @@ const standardCategories = [
 const subNavTabs = [
   'ALL',
   'T-SHIRT',
-  'ROUND NECK T-SHIRT',
+  'CAP',
   'POLO',
   'SHORTS',
   'CUT SLEEVES',

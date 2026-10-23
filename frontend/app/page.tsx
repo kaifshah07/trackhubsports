@@ -13,9 +13,9 @@ const categoryCards = [
     href: '/shop?category=T-Shirt'
   },
   {
-    name: 'Round Neck T-Shirt',
-    image: '/categories/round-neck-tshirt.png',
-    href: '/shop?category=Round Neck T-Shirt'
+    name: 'Cap',
+    image: '/categories/cap.png',
+    href: '/shop?category=Cap'
   },
   {
     name: 'Polo',
