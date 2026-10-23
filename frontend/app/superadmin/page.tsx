@@ -79,6 +79,10 @@ export default function SuperAdminPage() {
   const [editingBanner, setEditingBanner] = useState<any>(null);
   const [editBannerTitle, setEditBannerTitle] = useState('');
   const [editBannerImage, setEditBannerImage] = useState('');
+  const [uploadingBanner, setUploadingBanner] = useState(false);
+  const [uploadErrorBanner, setUploadErrorBanner] = useState('');
+  const [editUploadingBanner, setEditUploadingBanner] = useState(false);
+  const [editUploadErrorBanner, setEditUploadErrorBanner] = useState('');
 
   // Gateway Config State
   const [razorpayKeyId, setRazorpayKeyId] = useState('rzp_live_••••••••••••');
@@ -461,9 +465,56 @@ export default function SuperAdminPage() {
     } catch (err) { alert('Error deleting coupon.'); }
   };
 
+  const handleUploadImageFile = async (
+    file: File, 
+    onSuccess: (url: string) => void, 
+    setUploading: (val: boolean) => void, 
+    setError: (err: string) => void
+  ) => {
+    setError('');
+    const allowed = ['image/jpeg', 'image/png', 'image/webp'];
+    if (!allowed.includes(file.type)) {
+      setError('Unsupported format. Please select a JPEG, PNG, or WebP image.');
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      setError('Image size exceeds the 5 MB limit.');
+      return;
+    }
+
+    setUploading(true);
+    try {
+      const formData = new FormData();
+      formData.append('image', file);
+
+      const res = await fetch(`${apiUrl}/api/admin/upload-image`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`
+        },
+        body: formData
+      });
+
+      const data = await res.json();
+      if (data.success && data.imageUrl) {
+        onSuccess(data.imageUrl);
+      } else {
+        setError(data.error || 'Upload failed. Please verify storage configuration.');
+      }
+    } catch (err: any) {
+      setError('Network error while uploading image. Please check connection.');
+    } finally {
+      setUploading(false);
+    }
+  };
+
   // --- Banner Handlers ---
   const handleCreateBanner = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!bannerImage) {
+      alert('Please upload a banner image.');
+      return;
+    }
     try {
       const res = await fetch(`${apiUrl}/api/admin/banners`, {
         method: 'POST',
@@ -482,6 +533,10 @@ export default function SuperAdminPage() {
   const handleUpdateBanner = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingBanner) return;
+    if (!editBannerImage) {
+      alert('Please upload a banner image.');
+      return;
+    }
     try {
       const res = await fetch(`${apiUrl}/api/admin/banners/${editingBanner.id}`, {
         method: 'PUT',
@@ -1060,11 +1115,42 @@ export default function SuperAdminPage() {
                       <label className="block text-[11px] font-bold text-gray-700 mb-1">Banner Title *</label>
                       <input type="text" required value={bannerTitle} onChange={e => setBannerTitle(e.target.value)} placeholder="Summer Championship Drop" className="w-full p-3 border rounded-xl text-xs bg-white text-gray-900" />
                     </div>
-                    <div>
-                      <label className="block text-[11px] font-bold text-gray-700 mb-1">Banner Image URL *</label>
-                      <input type="url" required value={bannerImage} onChange={e => setBannerImage(e.target.value)} placeholder="https://images.unsplash.com/photo-..." className="w-full p-3 border rounded-xl text-xs bg-white text-gray-900" />
+                    <div className="p-4 border rounded-2xl bg-gray-50/70 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <label className="block text-[11px] font-bold text-gray-700">Banner Image *</label>
+                        {bannerImage && (
+                          <button type="button" onClick={() => setBannerImage('')} className="text-[10px] text-red-600 font-bold hover:underline">Remove</button>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-3">
+                        {bannerImage ? (
+                          <div className="relative w-28 h-16 rounded-xl border bg-white overflow-hidden shrink-0 shadow-xs">
+                            <img src={bannerImage} alt="Banner preview" className="w-full h-full object-cover" />
+                          </div>
+                        ) : (
+                          <div className="w-28 h-16 rounded-xl border border-dashed border-gray-300 bg-white flex items-center justify-center shrink-0 text-gray-400">
+                            <UploadCloud className="w-6 h-6" />
+                          </div>
+                        )}
+                        <div className="flex-1">
+                          <input 
+                            type="file" 
+                            accept="image/jpeg,image/png,image/webp"
+                            onChange={e => {
+                              const file = e.target.files?.[0];
+                              if (file) handleUploadImageFile(file, setBannerImage, setUploadingBanner, setUploadErrorBanner);
+                            }}
+                            disabled={uploadingBanner}
+                            className="block w-full text-xs text-gray-500 file:mr-2 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-bold file:bg-slate-900 file:text-white hover:file:bg-slate-800 cursor-pointer"
+                          />
+                        </div>
+                      </div>
+                      {uploadingBanner && <p className="text-[10px] text-amber-600 font-bold animate-pulse">Uploading banner image...</p>}
+                      {uploadErrorBanner && <p className="text-[10px] text-red-600 font-semibold">{uploadErrorBanner}</p>}
                     </div>
-                    <button type="submit" className="w-full bg-amber-400 text-slate-950 py-3.5 rounded-xl font-black text-xs uppercase tracking-wider">Publish Banner Live</button>
+                    <button type="submit" disabled={uploadingBanner} className="w-full bg-amber-400 hover:bg-amber-500 text-slate-950 py-3.5 rounded-xl font-black text-xs uppercase tracking-wider disabled:opacity-50 transition">
+                      {uploadingBanner ? 'Uploading Banner...' : 'Publish Banner Live'}
+                    </button>
                   </form>
                 </div>
 
@@ -1212,13 +1298,44 @@ export default function SuperAdminPage() {
               <label className="block text-[11px] font-bold text-gray-700 mb-1">Banner Title</label>
               <input type="text" required value={editBannerTitle} onChange={e => setEditBannerTitle(e.target.value)} className="w-full p-3 border rounded-xl text-xs text-gray-900 bg-white font-bold" />
             </div>
-            <div>
-              <label className="block text-[11px] font-bold text-gray-700 mb-1">Banner Image URL</label>
-              <input type="url" required value={editBannerImage} onChange={e => setEditBannerImage(e.target.value)} className="w-full p-3 border rounded-xl text-xs text-gray-900 bg-white" />
+            <div className="p-4 border rounded-2xl bg-gray-50/70 space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="block text-[11px] font-bold text-gray-700">Banner Image *</label>
+                {editBannerImage && (
+                  <button type="button" onClick={() => setEditBannerImage('')} className="text-[10px] text-red-600 font-bold hover:underline">Remove</button>
+                )}
+              </div>
+              <div className="flex items-center gap-3">
+                {editBannerImage ? (
+                  <div className="relative w-28 h-16 rounded-xl border bg-white overflow-hidden shrink-0 shadow-xs">
+                    <img src={editBannerImage} alt="Banner preview" className="w-full h-full object-cover" />
+                  </div>
+                ) : (
+                  <div className="w-28 h-16 rounded-xl border border-dashed border-gray-300 bg-white flex items-center justify-center shrink-0 text-gray-400">
+                    <UploadCloud className="w-6 h-6" />
+                  </div>
+                )}
+                <div className="flex-1">
+                  <input 
+                    type="file" 
+                    accept="image/jpeg,image/png,image/webp"
+                    onChange={e => {
+                      const file = e.target.files?.[0];
+                      if (file) handleUploadImageFile(file, setEditBannerImage, setEditUploadingBanner, setEditUploadErrorBanner);
+                    }}
+                    disabled={editUploadingBanner}
+                    className="block w-full text-xs text-gray-500 file:mr-2 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-bold file:bg-slate-900 file:text-white hover:file:bg-slate-800 cursor-pointer"
+                  />
+                </div>
+              </div>
+              {editUploadingBanner && <p className="text-[10px] text-amber-600 font-bold animate-pulse">Uploading banner image...</p>}
+              {editUploadErrorBanner && <p className="text-[10px] text-red-600 font-semibold">{editUploadErrorBanner}</p>}
             </div>
             <div className="flex gap-2 pt-2">
               <button type="button" onClick={() => setEditingBanner(null)} className="flex-1 bg-gray-100 py-3 rounded-xl font-bold text-xs text-gray-700">Cancel</button>
-              <button type="submit" className="flex-1 bg-amber-400 text-slate-950 py-3 rounded-xl font-black text-xs">Save Changes</button>
+              <button type="submit" disabled={editUploadingBanner} className="flex-1 bg-amber-400 text-slate-950 py-3 rounded-xl font-black text-xs disabled:opacity-50">
+                {editUploadingBanner ? 'Uploading...' : 'Save Changes'}
+              </button>
             </div>
           </form>
         </div>
