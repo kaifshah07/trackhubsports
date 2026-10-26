@@ -9,6 +9,11 @@ interface EmailPayload {
 
 export async function sendBrevoEmail({ toEmail, toName, subject, htmlContent }: EmailPayload) {
   try {
+    if (!process.env.BREVO_API_KEY || !process.env.SENDER_EMAIL) {
+      console.warn("[Brevo Email] BREVO_API_KEY or SENDER_EMAIL not configured in environment.");
+      return { success: false, error: "Email service not configured in environment." };
+    }
+
     const response = await axios.post(
       'https://api.brevo.com/v3/smtp/email',
       {
@@ -24,9 +29,11 @@ export async function sendBrevoEmail({ toEmail, toName, subject, htmlContent }: 
         },
       }
     );
+    console.log(`[Brevo Email] Successfully dispatched "${subject}" to ${toEmail}`);
     return { success: true, data: response.data };
   } catch (error: any) {
-    console.error("Brevo Email Error:", error.response?.data || error.message);
-    return { success: false, error: error.message };
+    const errorMsg = error.response?.data?.message || error.response?.data || error.message;
+    console.error(`[Brevo Email Error] Failed to send "${subject}" to ${toEmail}:`, errorMsg);
+    return { success: false, error: typeof errorMsg === 'string' ? errorMsg : JSON.stringify(errorMsg) };
   }
 }

@@ -200,20 +200,44 @@ export default function Home() {
       {banners.length > 0 ? (
         <section className="relative bg-neutral-950 text-white overflow-hidden shadow-sm h-80 sm:h-[420px]">
           {banners.map((banner, idx) => (
-            <div key={banner.id || idx} className={`absolute inset-0 transition-opacity duration-1000 ${idx === currentBannerIdx ? 'opacity-100 z-10' : 'opacity-0 z-0'}`}>
-              <img src={banner.imageUrl} alt={banner.title} className="w-full h-full object-cover opacity-80" />
+            <Link
+              key={banner.id || idx}
+              href={banner.linkUrl || '/shop'}
+              className={`absolute inset-0 transition-opacity duration-1000 block cursor-pointer group ${
+                idx === currentBannerIdx ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'
+              }`}
+            >
+              <img src={banner.imageUrl} alt={banner.title} className="w-full h-full object-cover opacity-80 group-hover:opacity-90 transition duration-500" />
               <div className="absolute inset-0 bg-gradient-to-t from-neutral-950 via-neutral-950/20 to-transparent flex flex-col justify-end p-8 sm:p-14">
                 <span className="bg-white text-black text-[10px] font-black px-3 py-1 rounded-sm uppercase tracking-widest w-fit mb-3">Featured Drop</span>
-                <h2 className="text-3xl sm:text-5xl font-black tracking-tight text-white">{banner.title}</h2>
+                <h2 className="text-3xl sm:text-5xl font-black tracking-tight text-white group-hover:text-amber-400 transition">{banner.title}</h2>
               </div>
-            </div>
+            </Link>
           ))}
           {banners.length > 1 && (
             <>
-              <button onClick={() => setCurrentBannerIdx(prev => (prev === 0 ? banners.length - 1 : prev - 1))} className="absolute left-4 top-1/2 -translate-y-1/2 z-20 p-2.5 rounded-full bg-black/40 hover:bg-black text-white transition cursor-pointer">
+              <button 
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  e.preventDefault();
+                  setCurrentBannerIdx(prev => (prev === 0 ? banners.length - 1 : prev - 1));
+                }} 
+                className="absolute left-4 top-1/2 -translate-y-1/2 z-20 p-2.5 rounded-full bg-black/40 hover:bg-black text-white transition cursor-pointer"
+                aria-label="Previous banner"
+              >
                 <ChevronLeft className="w-5 h-5" />
               </button>
-              <button onClick={() => setCurrentBannerIdx(prev => (prev + 1) % banners.length)} className="absolute right-4 top-1/2 -translate-y-1/2 z-20 p-2.5 rounded-full bg-black/40 hover:bg-black text-white transition cursor-pointer">
+              <button 
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  e.preventDefault();
+                  setCurrentBannerIdx(prev => (prev + 1) % banners.length);
+                }} 
+                className="absolute right-4 top-1/2 -translate-y-1/2 z-20 p-2.5 rounded-full bg-black/40 hover:bg-black text-white transition cursor-pointer"
+                aria-label="Next banner"
+              >
                 <ChevronRight className="w-5 h-5" />
               </button>
             </>

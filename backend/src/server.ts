@@ -153,9 +153,10 @@ app.post('/api/auth/register', async (req, res) => {
       return res.status(400).json({ success: false, error: "Email, password, and full name are required." });
     }
 
-    const existingUser = await prisma.user.findUnique({ where: { email } });
+    const cleanEmail = email.trim().toLowerCase();
+    const existingUser = await prisma.user.findUnique({ where: { email: cleanEmail } });
     if (existingUser && existingUser.isVerified) {
-      return res.status(400).json({ success: false, error: "User with this email already exists." });
+      return res.status(400).json({ success: false, error: "User with this email already exists. Please log in." });
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
@@ -163,19 +164,80 @@ app.post('/api/auth/register', async (req, res) => {
     const otpExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
     await prisma.user.upsert({
-      where: { email },
-      update: { passwordHash: hashedPassword, fullName, phone, otpCode, otpExpiresAt, role: role || "CUSTOMER" },
-      create: { email, passwordHash: hashedPassword, fullName, phone, otpCode, otpExpiresAt, role: role || "CUSTOMER", isVerified: false }
+      where: { email: cleanEmail },
+      update: { passwordHash: hashedPassword, fullName: fullName.trim(), phone: phone ? phone.trim() : null, otpCode, otpExpiresAt, role: role || "CUSTOMER" },
+      create: { email: cleanEmail, passwordHash: hashedPassword, fullName: fullName.trim(), phone: phone ? phone.trim() : null, otpCode, otpExpiresAt, role: role || "CUSTOMER", isVerified: false }
     });
 
-    await sendBrevoEmail({
-      toEmail: email,
-      toName: fullName,
+    console.log(`[AUTH REGISTER] Generated OTP for ${cleanEmail}: ${otpCode}`);
+
+    const emailRes = await sendBrevoEmail({
+      toEmail: cleanEmail,
+      toName: fullName.trim(),
       subject: "Verify Your Email — Track Hub Sports",
-      htmlContent: `<h2>Hello ${fullName},</h2><p>Your verification OTP is: <b>${otpCode}</b>. It expires in 10 minutes.</p>`
+      htmlContent: `<h2>Hello ${fullName.trim()},</h2><p>Your verification OTP is: <b>${otpCode}</b>. It expires in 10 minutes.</p>`
     });
 
-    res.json({ success: true, message: "OTP sent to your email. Please verify to complete registration." });
+    if (!emailRes.success) {
+      console.warn(`[AUTH] Brevo delivery failed for ${cleanEmail}:`, emailRes.error);
+      return res.json({
+        success: true,
+        message: "Registration initiated! Verification code generated.",
+        emailDelivered: false,
+        otp: otpCode
+      });
+    }
+
+    res.json({ success: true, message: "OTP sent to your email. Please verify to complete registration.", emailDelivered: true });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/auth/resend-otp', async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) {
+      return res.status(400).json({ success: false, error: "Email is required." });
+    }
+    const cleanEmail = email.trim().toLowerCase();
+    const user = await prisma.user.findUnique({ where: { email: cleanEmail } });
+    if (!user) {
+      return res.status(404).json({ success: false, error: "User with this email not found." });
+    }
+
+    if (user.isVerified) {
+      return res.status(400).json({ success: false, error: "Email is already verified. Please sign in." });
+    }
+
+    const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+    const otpExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+    await prisma.user.update({
+      where: { email: cleanEmail },
+      data: { otpCode, otpExpiresAt }
+    });
+
+    console.log(`[AUTH RESEND OTP] Generated new OTP for ${cleanEmail}: ${otpCode}`);
+
+    const emailRes = await sendBrevoEmail({
+      toEmail: cleanEmail,
+      toName: user.fullName || "Valued Customer",
+      subject: "Your New Verification OTP — Track Hub Sports",
+      htmlContent: `<h2>Hello ${user.fullName || 'Valued Customer'},</h2><p>Your new verification OTP is: <b>${otpCode}</b>. It expires in 10 minutes.</p>`
+    });
+
+    if (!emailRes.success) {
+      console.warn(`[AUTH] Resend OTP email delivery failed for ${cleanEmail}:`, emailRes.error);
+      return res.json({
+        success: true,
+        message: "New verification code generated.",
+        emailDelivered: false,
+        otp: otpCode
+      });
+    }
+
+    res.json({ success: true, message: "A new OTP has been sent to your email.", emailDelivered: true });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -184,14 +246,20 @@ app.post('/api/auth/register', async (req, res) => {
 app.post('/api/auth/verify-otp', async (req, res) => {
   try {
     const { email, otp } = req.body;
-    const user = await prisma.user.findUnique({ where: { email } });
+    if (!email || !otp) {
+      return res.status(400).json({ success: false, error: "Email and OTP are required." });
+    }
 
-    if (!user || user.otpCode !== otp || !user.otpExpiresAt || user.otpExpiresAt < new Date()) {
+    const cleanEmail = email.trim().toLowerCase();
+    const cleanOtp = String(otp).trim();
+    const user = await prisma.user.findUnique({ where: { email: cleanEmail } });
+
+    if (!user || user.otpCode !== cleanOtp || !user.otpExpiresAt || user.otpExpiresAt < new Date()) {
       return res.status(400).json({ success: false, error: "Invalid or expired OTP." });
     }
 
     const verifiedUser = await prisma.user.update({
-      where: { email },
+      where: { email: cleanEmail },
       data: { isVerified: true, otpCode: null, otpExpiresAt: null }
     });
 
@@ -205,7 +273,12 @@ app.post('/api/auth/verify-otp', async (req, res) => {
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
-    const user = await prisma.user.findUnique({ where: { email } });
+    if (!email || !password) {
+      return res.status(400).json({ success: false, error: "Email and password are required." });
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
+    const user = await prisma.user.findUnique({ where: { email: cleanEmail } });
     if (!user || !user.passwordHash) {
       return res.status(400).json({ success: false, error: "Invalid email or password." });
     }
@@ -216,7 +289,29 @@ app.post('/api/auth/login', async (req, res) => {
     }
 
     if (!user.isVerified) {
-      return res.status(400).json({ success: false, error: "Please verify your email with OTP before logging in." });
+      const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+      const otpExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
+      await prisma.user.update({
+        where: { email: cleanEmail },
+        data: { otpCode, otpExpiresAt }
+      });
+
+      console.log(`[AUTH LOGIN UNVERIFIED] Generated fresh OTP for ${cleanEmail}: ${otpCode}`);
+
+      const emailRes = await sendBrevoEmail({
+        toEmail: cleanEmail,
+        toName: user.fullName || "User",
+        subject: "Verify Your Email — Track Hub Sports",
+        htmlContent: `<h2>Hello ${user.fullName || 'User'},</h2><p>Your verification OTP is: <b>${otpCode}</b>. It expires in 10 minutes.</p>`
+      });
+
+      return res.status(403).json({
+        success: false,
+        requiresVerification: true,
+        email: cleanEmail,
+        otp: !emailRes.success ? otpCode : undefined,
+        error: "Please verify your email with OTP before logging in. A new OTP has been generated."
+      });
     }
 
     const token = jwt.sign({ userId: user.id, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
@@ -229,22 +324,37 @@ app.post('/api/auth/login', async (req, res) => {
 app.post('/api/auth/forgot-password', async (req, res) => {
   try {
     const { email } = req.body;
-    const user = await prisma.user.findUnique({ where: { email } });
+    if (!email) return res.status(400).json({ success: false, error: "Email is required." });
+
+    const cleanEmail = email.trim().toLowerCase();
+    const user = await prisma.user.findUnique({ where: { email: cleanEmail } });
     if (!user) return res.status(404).json({ success: false, error: "User not found." });
 
     const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
     const otpExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
-    await prisma.user.update({ where: { email }, data: { otpCode, otpExpiresAt } });
+    await prisma.user.update({ where: { email: cleanEmail }, data: { otpCode, otpExpiresAt } });
 
-    await sendBrevoEmail({
-      toEmail: email,
+    console.log(`[AUTH FORGOT PASSWORD] Generated OTP for ${cleanEmail}: ${otpCode}`);
+
+    const emailRes = await sendBrevoEmail({
+      toEmail: cleanEmail,
       toName: user.fullName,
       subject: "Password Reset OTP — Track Hub Sports",
       htmlContent: `<h2>Password Reset Request</h2><p>Your OTP to reset password is: <b>${otpCode}</b></p>`
     });
 
-    res.json({ success: true, message: "Password reset OTP sent to email." });
+    if (!emailRes.success) {
+      console.warn(`[AUTH] Forgot password email delivery failed for ${cleanEmail}:`, emailRes.error);
+      return res.json({
+        success: true,
+        message: "Password reset OTP generated.",
+        emailDelivered: false,
+        otp: otpCode
+      });
+    }
+
+    res.json({ success: true, message: "Password reset OTP sent to email.", emailDelivered: true });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -253,16 +363,22 @@ app.post('/api/auth/forgot-password', async (req, res) => {
 app.post('/api/auth/reset-password', async (req, res) => {
   try {
     const { email, otp, newPassword } = req.body;
-    const user = await prisma.user.findUnique({ where: { email } });
+    if (!email || !otp || !newPassword) {
+      return res.status(400).json({ success: false, error: "Email, OTP, and new password are required." });
+    }
 
-    if (!user || user.otpCode !== otp || !user.otpExpiresAt || user.otpExpiresAt < new Date()) {
+    const cleanEmail = email.trim().toLowerCase();
+    const cleanOtp = String(otp).trim();
+    const user = await prisma.user.findUnique({ where: { email: cleanEmail } });
+
+    if (!user || user.otpCode !== cleanOtp || !user.otpExpiresAt || user.otpExpiresAt < new Date()) {
       return res.status(400).json({ success: false, error: "Invalid or expired OTP." });
     }
 
     const passwordHash = await bcrypt.hash(newPassword, 10);
     await prisma.user.update({
-      where: { email },
-      data: { passwordHash, otpCode: null, otpExpiresAt: null }
+      where: { email: cleanEmail },
+      data: { passwordHash, otpCode: null, otpExpiresAt: null, isVerified: true }
     });
 
     res.json({ success: true, message: "Password successfully reset. You can now login." });

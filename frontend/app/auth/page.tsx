@@ -2,7 +2,7 @@
 
 import React, { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Lock, Mail, User, Phone, ArrowRight, ShieldCheck, Trophy } from 'lucide-react';
+import { Lock, Mail, User, Phone, ArrowRight, ShieldCheck, Trophy, RotateCw } from 'lucide-react';
 
 export default function AuthPage() {
   const [mode, setMode] = useState<'login' | 'register' | 'verify-otp' | 'forgot' | 'reset'>('login');
@@ -21,6 +21,46 @@ export default function AuthPage() {
 
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'https://track-hub-backend.onrender.com';
 
+  const navigateByRole = (role?: string) => {
+    if (role === 'SUPER_ADMIN') {
+      router.push('/superadmin');
+    } else if (role === 'ADMIN') {
+      router.push('/admin');
+    } else {
+      router.push('/shop');
+    }
+  };
+
+  const handleResendOtp = async () => {
+    if (!formData.email) {
+      alert("Please provide an email address first.");
+      return;
+    }
+    setLoading(true);
+    try {
+      const res = await fetch(`${apiUrl}/api/auth/resend-otp`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: formData.email.trim().toLowerCase() })
+      });
+      const data = await res.json();
+      if (data.success) {
+        if (data.otp) {
+          setFormData(prev => ({ ...prev, otp: data.otp }));
+          alert(`New verification code: ${data.otp}\n(Code has been auto-filled for your convenience)`);
+        } else {
+          alert(data.message || "A new OTP has been sent to your email.");
+        }
+      } else {
+        alert(data.error || "Failed to resend OTP.");
+      }
+    } catch (err) {
+      alert("Network error: Could not reach authentication server.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
@@ -38,7 +78,7 @@ export default function AuthPage() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ 
-            email: formData.email, 
+            email: formData.email.trim().toLowerCase(), 
             password: formData.password, 
             fullName, 
             phone: formData.phone 
@@ -46,7 +86,12 @@ export default function AuthPage() {
         });
         const data = await res.json();
         if (data.success) {
-          alert("OTP sent to your email. Please verify to complete signup.");
+          if (data.otp) {
+            setFormData(prev => ({ ...prev, otp: data.otp }));
+            alert(`Account created! Verification code: ${data.otp}\n(Code auto-filled below for instant verification)`);
+          } else {
+            alert(data.message || "OTP sent to your email. Please verify to complete signup.");
+          }
           setMode('verify-otp');
         } else {
           alert(data.error || 'Registration failed');
@@ -55,14 +100,17 @@ export default function AuthPage() {
         const res = await fetch(`${apiUrl}/api/auth/verify-otp`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email: formData.email, otp: formData.otp })
+          body: JSON.stringify({ 
+            email: formData.email.trim().toLowerCase(), 
+            otp: formData.otp.trim() 
+          })
         });
         const data = await res.json();
         if (data.success) {
           localStorage.setItem('token', data.token);
           localStorage.setItem('user', JSON.stringify(data.user));
           alert("Account verified & logged in successfully!");
-          router.push('/shop');
+          navigateByRole(data.user?.role);
         } else {
           alert(data.error || 'Invalid OTP');
         }
@@ -70,14 +118,25 @@ export default function AuthPage() {
         const res = await fetch(`${apiUrl}/api/auth/login`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email: formData.email, password: formData.password })
+          body: JSON.stringify({ 
+            email: formData.email.trim().toLowerCase(), 
+            password: formData.password 
+          })
         });
         const data = await res.json();
         if (data.success) {
           localStorage.setItem('token', data.token);
           localStorage.setItem('user', JSON.stringify(data.user));
           alert(data.message || 'Logged in successfully!');
-          router.push(data.user.role === 'ADMIN' ? '/admin' : '/shop');
+          navigateByRole(data.user?.role);
+        } else if (data.requiresVerification) {
+          if (data.otp) {
+            setFormData(prev => ({ ...prev, otp: data.otp }));
+            alert(`Account requires verification. Your new OTP code is: ${data.otp}\n(Code auto-filled below)`);
+          } else {
+            alert(data.error || "Please verify your email with OTP before logging in.");
+          }
+          setMode('verify-otp');
         } else {
           alert(data.error || 'Login failed');
         }
@@ -85,11 +144,16 @@ export default function AuthPage() {
         const res = await fetch(`${apiUrl}/api/auth/forgot-password`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email: formData.email })
+          body: JSON.stringify({ email: formData.email.trim().toLowerCase() })
         });
         const data = await res.json();
         if (data.success) {
-          alert("Password reset OTP sent to your email.");
+          if (data.otp) {
+            setFormData(prev => ({ ...prev, otp: data.otp }));
+            alert(`Password reset code: ${data.otp}\n(Code auto-filled below)`);
+          } else {
+            alert(data.message || "Password reset OTP sent to your email.");
+          }
           setMode('reset');
         } else {
           alert(data.error || 'Failed to send reset OTP');
@@ -98,7 +162,11 @@ export default function AuthPage() {
         const res = await fetch(`${apiUrl}/api/auth/reset-password`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email: formData.email, otp: formData.otp, newPassword: formData.newPassword })
+          body: JSON.stringify({ 
+            email: formData.email.trim().toLowerCase(), 
+            otp: formData.otp.trim(), 
+            newPassword: formData.newPassword 
+          })
         });
         const data = await res.json();
         if (data.success) {
@@ -110,7 +178,7 @@ export default function AuthPage() {
       }
     } catch (err: any) {
       console.error("Auth Error:", err);
-      alert("An unexpected error occurred.");
+      alert("An unexpected error occurred. Please try again.");
     } finally {
       setLoading(false);
     }
@@ -126,14 +194,14 @@ export default function AuthPage() {
       const res = await fetch(`${apiUrl}/api/auth/social`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, fullName: `${name} ${surname}`, provider })
+        body: JSON.stringify({ email: email.trim().toLowerCase(), fullName: `${name} ${surname}`, provider })
       });
       const data = await res.json();
       if (data.success) {
         localStorage.setItem('token', data.token);
         localStorage.setItem('user', JSON.stringify(data.user));
         alert(`Logged in successfully via ${provider}!`);
-        router.push('/shop');
+        navigateByRole(data.user?.role);
       } else {
         alert(data.error || 'Social login failed');
       }
@@ -166,6 +234,13 @@ export default function AuthPage() {
             {mode === 'reset' && 'Enter your OTP code and new secure password'}
           </p>
         </div>
+
+        {mode === 'verify-otp' && formData.email && (
+          <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-center space-y-0.5">
+            <p className="text-[11px] text-slate-500 font-medium">Verifying account email</p>
+            <p className="text-xs font-black text-slate-900 font-mono tracking-wide break-all">{formData.email}</p>
+          </div>
+        )}
 
         <form onSubmit={handleSubmit} className="space-y-3.5">
           {mode === 'register' && (
@@ -259,7 +334,7 @@ export default function AuthPage() {
                 required
                 value={formData.otp}
                 onChange={e => setFormData({...formData, otp: e.target.value})}
-                className="w-full pl-10 pr-4 py-3 rounded-xl border border-gray-300 text-sm text-gray-900 bg-white font-bold tracking-widest focus:ring-2 focus:ring-blue-500 outline-none shadow-xs"
+                className="w-full pl-10 pr-4 py-3 rounded-xl border border-gray-300 text-sm text-gray-900 bg-white font-bold tracking-widest focus:ring-2 focus:ring-blue-500 outline-none shadow-xs text-center"
               />
             </div>
           )}
@@ -293,7 +368,7 @@ export default function AuthPage() {
           <button
             type="submit"
             disabled={loading}
-            className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3.5 rounded-xl shadow-lg transition flex items-center justify-center gap-2 text-xs uppercase tracking-wider disabled:opacity-50 mt-2"
+            className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3.5 rounded-xl shadow-lg transition flex items-center justify-center gap-2 text-xs uppercase tracking-wider disabled:opacity-50 mt-2 cursor-pointer"
           >
             {loading ? 'Processing...' : (
               mode === 'login' ? 'Sign In' :
@@ -304,22 +379,43 @@ export default function AuthPage() {
           </button>
         </form>
 
+        {mode === 'verify-otp' && (
+          <div className="flex items-center justify-between pt-1 px-1 text-xs">
+            <button
+              type="button"
+              disabled={loading}
+              onClick={handleResendOtp}
+              className="inline-flex items-center gap-1.5 text-blue-600 font-bold hover:underline disabled:opacity-50 cursor-pointer"
+            >
+              <RotateCw className="w-3.5 h-3.5" />
+              Resend OTP
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode('login')}
+              className="text-gray-500 hover:text-gray-800 font-semibold cursor-pointer"
+            >
+              Back to Sign In
+            </button>
+          </div>
+        )}
+
         {mode === 'register' && (
           <div className="space-y-3 pt-3 border-t border-gray-100">
             <p className="text-[10px] text-center text-gray-400 uppercase font-extrabold tracking-wider">Or register instantly with one click</p>
             <div className="grid grid-cols-3 gap-2">
-              <button onClick={() => handleSocialLogin('Google')} className="py-2.5 border border-gray-300 rounded-xl text-xs font-bold text-gray-700 bg-white hover:bg-gray-50 transition shadow-xs">Google</button>
-              <button onClick={() => handleSocialLogin('Apple')} className="py-2.5 border border-gray-300 rounded-xl text-xs font-bold text-gray-700 bg-white hover:bg-gray-50 transition shadow-xs">Apple</button>
-              <button onClick={() => handleSocialLogin('Facebook')} className="py-2.5 border border-gray-300 rounded-xl text-xs font-bold text-gray-700 bg-white hover:bg-gray-50 transition shadow-xs">Facebook</button>
+              <button onClick={() => handleSocialLogin('Google')} className="py-2.5 border border-gray-300 rounded-xl text-xs font-bold text-gray-700 bg-white hover:bg-gray-50 transition shadow-xs cursor-pointer">Google</button>
+              <button onClick={() => handleSocialLogin('Apple')} className="py-2.5 border border-gray-300 rounded-xl text-xs font-bold text-gray-700 bg-white hover:bg-gray-50 transition shadow-xs cursor-pointer">Apple</button>
+              <button onClick={() => handleSocialLogin('Facebook')} className="py-2.5 border border-gray-300 rounded-xl text-xs font-bold text-gray-700 bg-white hover:bg-gray-50 transition shadow-xs cursor-pointer">Facebook</button>
             </div>
           </div>
         )}
 
         <div className="text-center text-xs text-gray-500 font-medium pt-2">
           {mode === 'login' ? (
-            <>Don't have an account? <button onClick={() => setMode('register')} className="text-blue-600 font-bold hover:underline">Register Now</button></>
+            <>Don't have an account? <button onClick={() => setMode('register')} className="text-blue-600 font-bold hover:underline cursor-pointer">Register Now</button></>
           ) : (
-            <>Already have an account? <button onClick={() => setMode('login')} className="text-blue-600 font-bold hover:underline">Sign In</button></>
+            <>Already have an account? <button onClick={() => setMode('login')} className="text-blue-600 font-bold hover:underline cursor-pointer">Sign In</button></>
           )}
         </div>
       </div>

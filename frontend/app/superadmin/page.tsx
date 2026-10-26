@@ -76,9 +76,11 @@ export default function SuperAdminPage() {
 
   const [bannerTitle, setBannerTitle] = useState('');
   const [bannerImage, setBannerImage] = useState('');
+  const [bannerLink, setBannerLink] = useState('/shop');
   const [editingBanner, setEditingBanner] = useState<any>(null);
   const [editBannerTitle, setEditBannerTitle] = useState('');
   const [editBannerImage, setEditBannerImage] = useState('');
+  const [editBannerLink, setEditBannerLink] = useState('/shop');
   const [uploadingBanner, setUploadingBanner] = useState(false);
   const [uploadErrorBanner, setUploadErrorBanner] = useState('');
   const [editUploadingBanner, setEditUploadingBanner] = useState(false);
@@ -519,12 +521,12 @@ export default function SuperAdminPage() {
       const res = await fetch(`${apiUrl}/api/admin/banners`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ title: bannerTitle, imageUrl: bannerImage })
+        body: JSON.stringify({ title: bannerTitle, imageUrl: bannerImage, linkUrl: bannerLink || '/shop' })
       });
       const data = await res.json();
       if (data.success) {
         alert('Banner published!');
-        setBannerTitle(''); setBannerImage('');
+        setBannerTitle(''); setBannerImage(''); setBannerLink('/shop');
         fetchCatalogData();
       } else { alert(data.error); }
     } catch (err) { alert('Error publishing banner.'); }
@@ -541,7 +543,7 @@ export default function SuperAdminPage() {
       const res = await fetch(`${apiUrl}/api/admin/banners/${editingBanner.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ title: editBannerTitle, imageUrl: editBannerImage })
+        body: JSON.stringify({ title: editBannerTitle, imageUrl: editBannerImage, linkUrl: editBannerLink || '/shop' })
       });
       const data = await res.json();
       if (data.success) {
@@ -1115,6 +1117,10 @@ export default function SuperAdminPage() {
                       <label className="block text-[11px] font-bold text-gray-700 mb-1">Banner Title *</label>
                       <input type="text" required value={bannerTitle} onChange={e => setBannerTitle(e.target.value)} placeholder="Summer Championship Drop" className="w-full p-3 border rounded-xl text-xs bg-white text-gray-900" />
                     </div>
+                    <div>
+                      <label className="block text-[11px] font-bold text-gray-700 mb-1">Banner Redirect Link (e.g. /shop or /shop?section=Sale)</label>
+                      <input type="text" value={bannerLink} onChange={e => setBannerLink(e.target.value)} placeholder="/shop or /shop?section=Sale" className="w-full p-3 border rounded-xl text-xs bg-white text-gray-900 font-mono" />
+                    </div>
                     <div className="p-4 border rounded-2xl bg-gray-50/70 space-y-2">
                       <div className="flex items-center justify-between">
                         <label className="block text-[11px] font-bold text-gray-700">Banner Image *</label>
@@ -1163,9 +1169,12 @@ export default function SuperAdminPage() {
                         {banners.map(bn => (
                           <tr key={bn.id} className="hover:bg-gray-50">
                             <td className="py-3 px-4"><img src={bn.imageUrl} alt="" className="w-16 h-10 object-cover rounded-lg border shadow-xs" /></td>
-                            <td className="py-3 px-4 font-bold text-gray-900">{bn.title}</td>
+                            <td className="py-3 px-4">
+                              <div className="font-bold text-gray-900">{bn.title}</div>
+                              <div className="text-[10px] text-blue-600 font-mono mt-0.5">{bn.linkUrl || '/shop'}</div>
+                            </td>
                             <td className="py-3 px-4 text-right space-x-2">
-                              <button onClick={() => { setEditingBanner(bn); setEditBannerTitle(bn.title); setEditBannerImage(bn.imageUrl); }} className="px-3 py-1 bg-amber-100 text-amber-800 rounded-lg font-bold">Edit</button>
+                              <button onClick={() => { setEditingBanner(bn); setEditBannerTitle(bn.title); setEditBannerImage(bn.imageUrl); setEditBannerLink(bn.linkUrl || '/shop'); }} className="px-3 py-1 bg-amber-100 text-amber-800 rounded-lg font-bold">Edit</button>
                               <button onClick={() => handleDeleteBanner(bn.id)} className="px-3 py-1 bg-red-50 text-red-600 rounded-lg font-bold">Delete</button>
                             </td>
                           </tr>
@@ -1297,6 +1306,10 @@ export default function SuperAdminPage() {
             <div>
               <label className="block text-[11px] font-bold text-gray-700 mb-1">Banner Title</label>
               <input type="text" required value={editBannerTitle} onChange={e => setEditBannerTitle(e.target.value)} className="w-full p-3 border rounded-xl text-xs text-gray-900 bg-white font-bold" />
+            </div>
+            <div>
+              <label className="block text-[11px] font-bold text-gray-700 mb-1">Banner Redirect Link</label>
+              <input type="text" value={editBannerLink} onChange={e => setEditBannerLink(e.target.value)} placeholder="/shop or /shop?section=Sale" className="w-full p-3 border rounded-xl text-xs text-gray-900 bg-white font-mono" />
             </div>
             <div className="p-4 border rounded-2xl bg-gray-50/70 space-y-2">
               <div className="flex items-center justify-between">

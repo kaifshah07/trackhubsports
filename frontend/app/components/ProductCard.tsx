@@ -83,7 +83,7 @@ export default function ProductCard({
     router.push(`/product/${product.id}`);
   };
 
-  const showSecondary = hasMultipleImages && (activeImageIndex === 1 || isHovered);
+  const showSecondary = hasMultipleImages && activeImageIndex === 1;
 
   return (
     <div 
@@ -115,17 +115,6 @@ export default function ProductCard({
           </div>
         )}
 
-        {/* 2-Image Indicator Badge */}
-        {hasMultipleImages && (
-          <div 
-            title="Front & Back views available"
-            className="absolute bottom-2 left-2 sm:bottom-3 sm:left-3 bg-black/60 backdrop-blur-xs text-white text-[8px] sm:text-[9px] font-bold px-1.5 py-0.5 rounded flex items-center gap-1 z-10 shadow-xs opacity-90 transition pointer-events-none"
-          >
-            <Layers className="w-2.5 h-2.5 sm:w-3 sm:h-3" />
-            <span>2 Views</span>
-          </div>
-        )}
-
         {/* Wishlist Button */}
         <button
           type="button"
@@ -144,35 +133,47 @@ export default function ProductCard({
           />
         </button>
 
-        {/* Navigation Arrows for switching between images (Touch on mobile, Hover/click on desktop) */}
+        {/* Slide Buttons for Next / Prev Image */}
         {hasMultipleImages && (
           <>
             <button
               type="button"
-              onClick={handleToggleImage}
-              aria-label="Show previous product image"
-              className="absolute left-1.5 top-1/2 -translate-y-1/2 w-8 h-8 rounded-full bg-white/90 hover:bg-white text-black shadow-md flex items-center justify-center z-20 transition active:scale-90 opacity-90 sm:opacity-0 sm:group-hover:opacity-100 cursor-pointer"
+              onClick={(e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                setActiveImageIndex(0);
+              }}
+              aria-label="Show primary image"
+              className={`absolute left-1.5 top-1/2 -translate-y-1/2 w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-white/95 hover:bg-white text-black shadow-md flex items-center justify-center z-20 transition active:scale-90 cursor-pointer border border-black/10 ${
+                activeImageIndex === 0 ? 'opacity-40 pointer-events-none' : 'opacity-90 hover:opacity-100'
+              }`}
             >
               <ChevronLeft className="w-4 h-4" />
             </button>
             <button
               type="button"
-              onClick={handleToggleImage}
-              aria-label="Show next product image"
-              className="absolute right-1.5 top-1/2 -translate-y-1/2 w-8 h-8 rounded-full bg-white/90 hover:bg-white text-black shadow-md flex items-center justify-center z-20 transition active:scale-90 opacity-90 sm:opacity-0 sm:group-hover:opacity-100 cursor-pointer"
+              onClick={(e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                setActiveImageIndex(1);
+              }}
+              aria-label="Show next image"
+              className={`absolute right-1.5 top-1/2 -translate-y-1/2 w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-white/95 hover:bg-white text-black shadow-md flex items-center justify-center z-20 transition active:scale-90 cursor-pointer border border-black/10 ${
+                activeImageIndex === 1 ? 'opacity-40 pointer-events-none' : 'opacity-90 hover:opacity-100'
+              }`}
             >
               <ChevronRight className="w-4 h-4" />
             </button>
           </>
         )}
 
-        {/* Dots Indicator for image selection (Mobile & Desktop) */}
+        {/* Dots Indicator for image sliding */}
         {hasMultipleImages && (
-          <div className="absolute bottom-2 right-2 sm:bottom-3 sm:right-3 flex items-center gap-1 z-20 bg-black/50 backdrop-blur-xs px-1.5 py-1 rounded-full">
+          <div className="absolute bottom-2 right-2 sm:bottom-3 sm:right-3 flex items-center gap-1.5 z-20 bg-black/60 backdrop-blur-xs px-2 py-1 rounded-full">
             <button
               type="button"
               onClick={(e) => handleSelectImageIndex(e, 0)}
-              aria-label="Show front view"
+              aria-label="Show first image"
               className={`w-1.5 h-1.5 rounded-full transition-all cursor-pointer ${
                 activeImageIndex === 0 ? 'bg-white w-2.5' : 'bg-white/50 hover:bg-white/80'
               }`}
@@ -180,7 +181,7 @@ export default function ProductCard({
             <button
               type="button"
               onClick={(e) => handleSelectImageIndex(e, 1)}
-              aria-label="Show back view"
+              aria-label="Show next image"
               className={`w-1.5 h-1.5 rounded-full transition-all cursor-pointer ${
                 activeImageIndex === 1 ? 'bg-white w-2.5' : 'bg-white/50 hover:bg-white/80'
               }`}
@@ -197,8 +198,8 @@ export default function ProductCard({
             src={primaryImage}
             alt={product.name}
             onError={() => setPrimaryError(true)}
-            className={`w-full h-full object-contain p-2 transition-all duration-500 ${
-              showSecondary ? 'opacity-0 scale-95' : 'opacity-100 group-hover:scale-105'
+            className={`w-full h-full object-contain p-2 transition-opacity duration-300 ${
+              showSecondary ? 'opacity-0' : 'opacity-100'
             } ${isOutOfStock ? 'grayscale-40 opacity-80' : ''}`}
             loading="lazy"
           />
@@ -209,8 +210,8 @@ export default function ProductCard({
               src={secondaryImage}
               alt={`${product.name} alternate view`}
               onError={() => setSecondaryError(true)}
-              className={`absolute inset-0 w-full h-full object-contain p-2 transition-all duration-500 ${
-                showSecondary ? 'opacity-100 scale-105' : 'opacity-0 scale-95 pointer-events-none'
+              className={`absolute inset-0 w-full h-full object-contain p-2 transition-opacity duration-300 ${
+                showSecondary ? 'opacity-100' : 'opacity-0 pointer-events-none'
               } ${isOutOfStock ? 'grayscale-40 opacity-80' : ''}`}
               loading="lazy"
             />
