@@ -17,7 +17,7 @@ export default function FranchisePage() {
   const [loginPassword, setLoginPassword] = useState('');
   const [loginError, setLoginError] = useState('');
 
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'https://track-hub-backend.onrender.com';
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'https://trackhubsports.onrender.com';
 
   useEffect(() => {
     const savedToken = localStorage.getItem('franchiseToken');

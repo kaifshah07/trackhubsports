@@ -20,25 +20,57 @@ import axios from 'axios';
 
 const app = express();
 
-// Explicit CORS configuration allowing production, preview deployments, and local dev
+// Explicit CORS configuration allowing production custom domains, Vercel deployments, and local dev
+const envOrigins = (process.env.FRONTEND_URL || '')
+  .split(',')
+  .map(url => url.trim())
+  .filter(Boolean);
+
 const allowedOrigins = [
+  'https://www.trackhubsports.com',
+  'https://trackhubsports.com',
+  'http://www.trackhubsports.com',
+  'http://trackhubsports.com',
   'https://trackhubsports.vercel.app',
   'http://localhost:3000',
-  process.env.FRONTEND_URL
-].filter(Boolean) as string[];
+  'http://localhost:5173',
+  ...envOrigins
+];
 
-app.use(cors({
+const corsOptions: cors.CorsOptions = {
   origin: (origin, callback) => {
+    // Allow non-browser requests or server-to-server calls with no origin header
     if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin) || origin.endsWith('.vercel.app')) {
+
+    let isAllowed = allowedOrigins.includes(origin);
+    if (!isAllowed) {
+      try {
+        const parsed = new URL(origin);
+        if (
+          parsed.hostname === 'trackhubsports.com' ||
+          parsed.hostname.endsWith('.trackhubsports.com') ||
+          parsed.hostname.endsWith('.vercel.app')
+        ) {
+          isAllowed = true;
+        }
+      } catch (e) {
+        isAllowed = false;
+      }
+    }
+
+    if (isAllowed) {
       return callback(null, true);
     }
-    return callback(new Error('Blocked by CORS policy'));
+    // Reject unauthorized origins cleanly without triggering 500 error
+    return callback(null, false);
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
-}));
+};
+
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 
 app.use(express.json({
   limit: '50mb',

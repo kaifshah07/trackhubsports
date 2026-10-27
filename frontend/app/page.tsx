@@ -60,7 +60,7 @@ export default function Home() {
   const [cartMap, setCartMap] = useState<{ [key: string]: number }>({});
   const router = useRouter();
 
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'https://track-hub-backend.onrender.com';
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'https://trackhubsports.onrender.com';
 
   const [wishlistIds, setWishlistIds] = useState<Set<string>>(new Set());
 

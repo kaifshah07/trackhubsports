@@ -47,7 +47,7 @@ function ShopContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
 
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'https://track-hub-backend.onrender.com';
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'https://trackhubsports.onrender.com';
 
   useEffect(() => {
     fetchShopData();

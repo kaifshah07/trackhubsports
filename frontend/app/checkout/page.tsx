@@ -25,7 +25,7 @@ export default function CheckoutPage() {
   const [gatewayError, setGatewayError] = useState<string | null>(null);
 
   const router = useRouter();
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'https://track-hub-backend.onrender.com';
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'https://trackhubsports.onrender.com';
 
   useEffect(() => {
     const savedCart = JSON.parse(localStorage.getItem('cartItems') || '[]');
