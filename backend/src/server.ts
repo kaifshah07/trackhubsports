@@ -187,6 +187,16 @@ const requireAdminOrSuper = (req: AuthenticatedRequest, res: Response, next: Nex
   next();
 };
 
+// Root endpoint for browser navigation and ping
+app.get('/', (req, res) => {
+  res.json({
+    success: true,
+    message: "Track Hub Sports API Server is online and operational.",
+    frontend: "https://www.trackhubsports.com",
+    timestamp: new Date()
+  });
+});
+
 // Simple Health Check Endpoint for Keep-Alive Pings
 app.get('/api/health', (req, res) => {
   res.json({ success: true, status: "Server is online and awake!", timestamp: new Date() });
