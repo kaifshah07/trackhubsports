@@ -1,9 +1,21 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { ArrowLeft, ShieldCheck, Tag, MapPin, CreditCard, CheckCircle2, Lock } from 'lucide-react';
+import {
+  ArrowLeft,
+  ShieldCheck,
+  Tag,
+  MapPin,
+  CreditCard,
+  CheckCircle2,
+  AlertCircle,
+  ShoppingBag,
+  Package,
+  Truck,
+  ArrowRight
+} from 'lucide-react';
 
 export default function CheckoutPage() {
   const [cartItems, setCartItems] = useState<any[]>([]);
@@ -24,12 +36,15 @@ export default function CheckoutPage() {
   const [loadingOrder, setLoadingOrder] = useState(false);
   const [gatewayError, setGatewayError] = useState<string | null>(null);
 
+  // On-page Order Confirmation Card State
+  const [confirmedOrder, setConfirmedOrder] = useState<any | null>(null);
+
   const router = useRouter();
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'https://trackhubsports.onrender.com';
 
   useEffect(() => {
     const savedCart = JSON.parse(localStorage.getItem('cartItems') || '[]');
-    if (savedCart.length === 0) {
+    if (savedCart.length === 0 && !confirmedOrder) {
       router.push('/cart');
       return;
     }
@@ -46,7 +61,7 @@ export default function CheckoutPage() {
     if (savedUser?.phone) setPhone(savedUser.phone);
     if (savedUser?.email) setUserEmail(savedUser.email);
 
-    // Fetch active coupons created from Admin/SuperAdmin dashboards
+    // Fetch active promotions
     fetch(`${apiUrl}/api/promotions`)
       .then(res => res.json())
       .then(data => {
@@ -55,7 +70,7 @@ export default function CheckoutPage() {
         }
       })
       .catch(err => console.error('Error fetching coupons:', err));
-  }, [router, apiUrl]);
+  }, [router, apiUrl, confirmedOrder]);
 
   // Dynamically load the official Razorpay Checkout SDK script
   const loadRazorpayScript = (): Promise<boolean> => {
@@ -74,18 +89,19 @@ export default function CheckoutPage() {
 
   // Auto-sync City and State when 6-digit Pincode is entered
   const handlePincodeChange = async (val: string) => {
-    setPincode(val);
-    if (val.length === 6) {
+    const cleaned = val.replace(/\D/g, '');
+    setPincode(cleaned);
+    if (cleaned.length === 6) {
       setLoadingPincode(true);
       try {
-        const res = await fetch(`https://api.postalpincode.in/pincode/${val}`);
+        const res = await fetch(`https://api.postalpincode.in/pincode/${cleaned}`);
         const data = await res.json();
         if (data && data[0]?.Status === 'Success') {
           const details = data[0].PostOffice[0];
           setCity(details.District);
           setState(details.State);
         } else {
-          alert('Invalid Pincode or details not found.');
+          setGatewayError('Pincode details not found. You can enter your City and State manually.');
         }
       } catch (err) {
         console.error('Pincode fetch error:', err);
@@ -101,6 +117,7 @@ export default function CheckoutPage() {
     setSelectedCoupon(coupon);
     const disc = Number(((subtotal * coupon.discountPct) / 100).toFixed(2));
     setDiscountAmount(disc);
+    setGatewayError(null);
   };
 
   const handleApplyCustomCoupon = (e: React.FormEvent) => {
@@ -108,9 +125,8 @@ export default function CheckoutPage() {
     const found = coupons.find(c => c.code.toUpperCase() === couponCodeInput.trim().toUpperCase());
     if (found) {
       handleApplyCoupon(found);
-      alert(`Coupon ${found.code} applied! ${found.discountPct}% OFF`);
     } else {
-      alert('Invalid coupon code.');
+      setGatewayError('Invalid coupon code entered.');
     }
   };
 
@@ -123,32 +139,33 @@ export default function CheckoutPage() {
     setGatewayError(null);
 
     if (!fullName.trim() || !phone.trim() || !address.trim() || !pincode.trim() || !city.trim() || !state.trim()) {
-      alert('Please fill in all delivery address fields before proceeding.');
+      setGatewayError('Please complete all delivery address fields before proceeding to payment.');
       return;
     }
 
     if (cartItems.length === 0) {
-      alert('Your cart is empty.');
+      setGatewayError('Your cart is empty.');
       router.push('/cart');
       return;
     }
 
     const token = localStorage.getItem('token') || localStorage.getItem('customerToken');
     if (!token) {
-      alert('Please sign in to complete your checkout.');
       router.push('/auth');
       return;
     }
 
-    // Prevent duplicate clicks
     if (loadingOrder) return;
     setLoadingOrder(true);
+
+    // Track payment completion state to eliminate modal.ondismiss race conditions
+    let paymentCompleted = false;
 
     try {
       // 1. Load Razorpay Checkout SDK
       const scriptLoaded = await loadRazorpayScript();
       if (!scriptLoaded) {
-        setGatewayError('Unable to load Razorpay payment gateway script. Please check your internet connection and try again.');
+        setGatewayError('Unable to load Razorpay payment gateway script. Please check your internet connection.');
         setLoadingOrder(false);
         return;
       }
@@ -184,7 +201,6 @@ export default function CheckoutPage() {
       if (!orderData.success) {
         const errorMsg = orderData.error || 'Failed to initialize payment order on server.';
         setGatewayError(errorMsg);
-        alert(errorMsg);
         setLoadingOrder(false);
         return;
       }
@@ -206,16 +222,19 @@ export default function CheckoutPage() {
           email: userEmail || ''
         },
         theme: {
-          color: '#0f172a' // slate-900 brand header
+          color: '#0f172a'
         },
         handler: async function (response: {
           razorpay_order_id: string;
           razorpay_payment_id: string;
           razorpay_signature: string;
         }) {
+          // Immediately set flag so modal.ondismiss does NOT treat this as a cancellation
+          paymentCompleted = true;
           setLoadingOrder(true);
+
           try {
-            // 4. Send payment credentials to backend for cryptographic signature verification
+            // 4. Send payment credentials to backend for cryptographic signature verification and capture check
             const verifyRes = await fetch(`${apiUrl}/api/payments/verify`, {
               method: 'POST',
               headers: {
@@ -234,43 +253,53 @@ export default function CheckoutPage() {
 
             if (!verifyData.success) {
               setGatewayError(verifyData.error || 'Payment signature verification failed.');
-              alert(`Payment verification failed: ${verifyData.error || 'Invalid signature'}`);
               setLoadingOrder(false);
               return;
             }
 
-            // 5. Verification successful: Clear cart and update local history cache
+            // 5. Verification confirmed: Clear cart only on genuine verified success
             localStorage.removeItem('cartItems');
             window.dispatchEvent(new Event('storage'));
 
             const existingOrders = JSON.parse(localStorage.getItem('customerOrders') || '[]');
-            localStorage.setItem('customerOrders', JSON.stringify([verifyData.order, ...existingOrders]));
+            const confirmedOrderRecord = verifyData.order || {
+              id: orderId,
+              totalAmount: finalPayableAmount,
+              paymentMode: 'RAZORPAY',
+              status: 'CONFIRMED',
+              createdAt: new Date().toISOString(),
+              orderItems: cartItems
+            };
 
-            alert('Payment verified successfully! Your order has been placed.');
-            router.push('/profile?tab=orders');
+            localStorage.setItem('customerOrders', JSON.stringify([confirmedOrderRecord, ...existingOrders]));
+
+            // Set state to display on-page Order Confirmation Card
+            setConfirmedOrder(confirmedOrderRecord);
+            setCartItems([]);
           } catch (verifyErr: any) {
             console.error('Verification request error:', verifyErr);
-            alert('A network error occurred while verifying your payment. Please check your order history.');
-            router.push('/profile?tab=orders');
+            setGatewayError('Network error during payment verification. Please check your order history.');
           } finally {
             setLoadingOrder(false);
           }
         },
         modal: {
           ondismiss: async function () {
-            setLoadingOrder(false);
-            // Notify server that customer dismissed checkout without completing payment
-            try {
-              await fetch(`${apiUrl}/api/payments/cancel-order`, {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'Authorization': `Bearer ${token}`
-                },
-                body: JSON.stringify({ orderId })
-              });
-            } catch (e) {
-              // Ignore background dismissal notification failures
+            // CRITICAL FIX: Only treat as cancellation if payment was NOT completed
+            if (!paymentCompleted) {
+              setLoadingOrder(false);
+              try {
+                await fetch(`${apiUrl}/api/payments/cancel-order`, {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                  },
+                  body: JSON.stringify({ orderId })
+                });
+              } catch (e) {
+                // Ignore dismissal background notification errors
+              }
             }
           }
         }
@@ -281,9 +310,8 @@ export default function CheckoutPage() {
 
       rzp.on('payment.failed', function (failureResponse: any) {
         console.error('Razorpay payment failed:', failureResponse.error);
-        const failDesc = failureResponse.error?.description || 'Transaction was declined by issuing bank.';
+        const failDesc = failureResponse.error?.description || 'Payment was declined or cancelled by the user.';
         setGatewayError(`Payment Failed: ${failDesc}`);
-        alert(`Payment Failed: ${failDesc}`);
         setLoadingOrder(false);
       });
 
@@ -292,15 +320,94 @@ export default function CheckoutPage() {
       console.error('Checkout processing error:', err);
       const msg = err.message || 'An unexpected error occurred while initiating checkout.';
       setGatewayError(msg);
-      alert(msg);
       setLoadingOrder(false);
     }
   };
 
+  // If order is confirmed, display the rich On-Page Order Confirmation Card
+  if (confirmedOrder) {
+    return (
+      <div className="min-h-screen bg-gray-50 text-gray-900 font-sans p-4 sm:p-6 md:p-10 pb-28 md:pb-10 flex items-center justify-center">
+        <div className="max-w-2xl w-full bg-white rounded-3xl border border-gray-200 shadow-2xl p-6 sm:p-10 space-y-6 text-center animate-in fade-in zoom-in-95 duration-200">
+          <div className="w-16 h-16 rounded-3xl bg-green-100 text-green-700 mx-auto flex items-center justify-center shadow-inner">
+            <CheckCircle2 className="w-10 h-10" />
+          </div>
+
+          <div className="space-y-1">
+            <span className="text-[11px] font-black uppercase tracking-wider text-green-700 bg-green-50 px-3 py-1 rounded-full border border-green-200">
+              Payment Verified & Order Confirmed
+            </span>
+            <h1 className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight pt-2">
+              Thank You for Your Order!
+            </h1>
+            <p className="text-xs text-gray-500 font-medium">
+              We’ve received your payment and our fulfillment team is preparing your sportswear.
+            </p>
+          </div>
+
+          {/* Order Details Card */}
+          <div className="bg-gray-50 rounded-2xl p-5 border border-gray-200/80 text-left space-y-4 text-xs">
+            <div className="flex justify-between items-center border-b pb-3">
+              <div>
+                <span className="text-gray-400 font-bold uppercase text-[10px]">Order Reference</span>
+                <p className="font-black text-slate-900 font-mono text-sm">
+                  #{confirmedOrder.id ? confirmedOrder.id.slice(-8).toUpperCase() : 'ORD-CONFIRMED'}
+                </p>
+              </div>
+              <div className="text-right">
+                <span className="text-gray-400 font-bold uppercase text-[10px]">Amount Paid</span>
+                <p className="font-black text-amber-600 text-base">
+                  ₹{Number(confirmedOrder.totalAmount || finalPayableAmount).toFixed(2)}
+                </p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1">
+              <div>
+                <span className="text-gray-400 font-bold uppercase text-[10px] flex items-center gap-1">
+                  <MapPin className="w-3 h-3 text-blue-600" /> Delivery Address
+                </span>
+                <p className="font-bold text-slate-900 mt-0.5">{fullName}</p>
+                <p className="text-gray-600">{address}</p>
+                <p className="text-gray-600">{city}, {state} - {pincode}</p>
+                <p className="text-gray-600">Contact: {phone}</p>
+              </div>
+              <div>
+                <span className="text-gray-400 font-bold uppercase text-[10px] flex items-center gap-1">
+                  <Truck className="w-3 h-3 text-amber-600" /> Shipping Status
+                </span>
+                <p className="font-bold text-green-700 mt-0.5">Order Placed & Processing</p>
+                <p className="text-gray-500 text-[11px] mt-1">
+                  Estimated delivery in 3–5 business days. You will receive updates via email.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Navigation Action Buttons */}
+          <div className="flex flex-col sm:flex-row gap-3 pt-2">
+            <Link
+              href="/profile?tab=orders"
+              className="flex-1 py-3.5 px-6 rounded-xl bg-amber-400 hover:bg-amber-500 text-slate-950 font-black text-xs uppercase tracking-wider shadow-md transition flex items-center justify-center gap-2 cursor-pointer"
+            >
+              <Package className="w-4 h-4" /> View My Orders
+            </Link>
+            <Link
+              href="/shop"
+              className="flex-1 py-3.5 px-6 rounded-xl border border-gray-300 hover:bg-gray-50 text-gray-800 font-bold text-xs uppercase tracking-wider transition flex items-center justify-center gap-2 cursor-pointer"
+            >
+              <ShoppingBag className="w-4 h-4" /> Continue Shopping
+            </Link>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900 font-sans p-4 sm:p-6 md:p-10 pb-28 md:pb-10">
       <div className="max-w-5xl mx-auto space-y-6 sm:space-y-8">
-        
+
         <div className="flex items-center gap-3">
           <Link href="/cart" className="p-2 rounded-xl bg-white border border-gray-200 hover:bg-gray-100 transition">
             <ArrowLeft className="w-5 h-5 text-gray-700" />
@@ -312,42 +419,45 @@ export default function CheckoutPage() {
         </div>
 
         {gatewayError && (
-          <div className="p-4 rounded-2xl bg-red-50 border border-red-200 text-xs text-red-700 font-semibold space-y-1">
-            <p className="font-bold uppercase tracking-wider text-red-800">Payment Gateway Notice</p>
-            <p>{gatewayError}</p>
+          <div className="p-4 rounded-2xl bg-red-50 border border-red-200 text-xs text-red-700 font-semibold flex items-start gap-2">
+            <AlertCircle className="w-4 h-4 text-red-600 flex-shrink-0 mt-0.5" />
+            <div>
+              <p className="font-bold uppercase tracking-wider text-red-800">Payment Notice</p>
+              <p>{gatewayError}</p>
+            </div>
           </div>
         )}
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 sm:gap-8">
-          
+
           {/* Left Column: Delivery Address & Pincode Sync */}
           <div className="md:col-span-2 space-y-6">
             <div className="bg-white p-5 sm:p-8 rounded-2xl sm:rounded-3xl border border-gray-200 shadow-sm space-y-4">
               <h2 className="text-sm font-black uppercase tracking-wider text-slate-900 flex items-center gap-2">
                 <MapPin className="w-4 h-4 text-blue-600" /> Shipping Address Details
               </h2>
-              
+
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
                 <div>
                   <label className="block font-bold text-gray-700 mb-1">Full Name *</label>
-                  <input type="text" required value={fullName} onChange={e => setFullName(e.target.value)} placeholder="John Doe" className="w-full p-3 border rounded-xl bg-white text-gray-900 font-medium" />
+                  <input type="text" required value={fullName} onChange={e => setFullName(e.target.value)} placeholder="Full Name" className="w-full p-3 border rounded-xl bg-white text-gray-900 font-medium" />
                 </div>
                 <div>
                   <label className="block font-bold text-gray-700 mb-1">Phone Number *</label>
-                  <input type="text" required value={phone} onChange={e => setPhone(e.target.value)} placeholder="9876543210" className="w-full p-3 border rounded-xl bg-white text-gray-900 font-medium" />
+                  <input type="tel" required value={phone} onChange={e => setPhone(e.target.value)} placeholder="Phone Number" className="w-full p-3 border rounded-xl bg-white text-gray-900 font-medium" />
                 </div>
                 <div>
                   <label className="block font-bold text-gray-700 mb-1">Pincode (6 digits) *</label>
-                  <input type="text" maxLength={6} required value={pincode} onChange={e => handlePincodeChange(e.target.value)} placeholder="431001" className="w-full p-3 border rounded-xl bg-white text-gray-900 font-bold tracking-widest" />
+                  <input type="text" maxLength={6} required value={pincode} onChange={e => handlePincodeChange(e.target.value)} placeholder="Pincode" className="w-full p-3 border rounded-xl bg-white text-gray-900 font-bold tracking-widest" />
                   {loadingPincode && <span className="text-[10px] text-blue-600 font-bold mt-1 block">Auto-fetching location...</span>}
                 </div>
                 <div>
                   <label className="block font-bold text-gray-700 mb-1">City *</label>
-                  <input type="text" required value={city} onChange={e => setCity(e.target.value)} placeholder="Chhatrapati Sambhajinagar" className="w-full p-3 border rounded-xl bg-white text-gray-900 font-medium" />
+                  <input type="text" required value={city} onChange={e => setCity(e.target.value)} placeholder="City" className="w-full p-3 border rounded-xl bg-white text-gray-900 font-medium" />
                 </div>
                 <div>
                   <label className="block font-bold text-gray-700 mb-1">State *</label>
-                  <input type="text" required value={state} onChange={e => setState(e.target.value)} placeholder="Maharashtra" className="w-full p-3 border rounded-xl bg-white text-gray-900 font-medium" />
+                  <input type="text" required value={state} onChange={e => setState(e.target.value)} placeholder="State" className="w-full p-3 border rounded-xl bg-white text-gray-900 font-medium" />
                 </div>
                 <div className="sm:col-span-2">
                   <label className="block font-bold text-gray-700 mb-1">Street Address / Landmark *</label>
@@ -361,10 +471,10 @@ export default function CheckoutPage() {
               <h2 className="text-sm font-black uppercase tracking-wider text-slate-900 flex items-center gap-2">
                 <Tag className="w-4 h-4 text-amber-500" /> Apply Available Coupons
               </h2>
-              
+
               <form onSubmit={handleApplyCustomCoupon} className="flex gap-2 text-xs">
                 <input type="text" value={couponCodeInput} onChange={e => setCouponCodeInput(e.target.value)} placeholder="Enter coupon code..." className="flex-1 p-3 border rounded-xl bg-white uppercase font-bold text-gray-900" />
-                <button type="submit" className="bg-slate-900 text-amber-400 font-black px-6 py-3 rounded-xl uppercase tracking-wider hover:bg-slate-800 transition">Apply</button>
+                <button type="submit" className="bg-slate-900 text-amber-400 font-black px-6 py-3 rounded-xl uppercase tracking-wider hover:bg-slate-800 transition cursor-pointer">Apply</button>
               </form>
 
               {coupons.length > 0 && (
@@ -372,7 +482,7 @@ export default function CheckoutPage() {
                   <p className="text-[11px] font-bold text-gray-500 uppercase">Available Promos:</p>
                   <div className="flex flex-wrap gap-2">
                     {coupons.map(cp => (
-                      <button key={cp.id} type="button" onClick={() => handleApplyCoupon(cp)} className={`px-3 py-1.5 border rounded-xl text-xs font-bold transition ${selectedCoupon?.id === cp.id ? 'bg-amber-400 border-amber-500 text-slate-950 shadow-xs' : 'bg-amber-50 border-amber-300 text-amber-900 hover:bg-amber-100'}`}>
+                      <button key={cp.id} type="button" onClick={() => handleApplyCoupon(cp)} className={`px-3 py-1.5 border rounded-xl text-xs font-bold transition cursor-pointer ${selectedCoupon?.id === cp.id ? 'bg-amber-400 border-amber-500 text-slate-950 shadow-xs' : 'bg-amber-50 border-amber-300 text-amber-900 hover:bg-amber-100'}`}>
                         {cp.code} ({cp.discountPct}% OFF)
                       </button>
                     ))}
@@ -385,7 +495,7 @@ export default function CheckoutPage() {
           {/* Right Column: Order Summary & Final Price Calculation */}
           <div className="bg-white p-5 sm:p-6 rounded-2xl sm:rounded-3xl border border-gray-200 shadow-sm space-y-6 h-fit">
             <h3 className="text-sm font-black uppercase tracking-wider text-slate-900">Price Details</h3>
-            
+
             <div className="space-y-3 text-xs border-b pb-4">
               <div className="flex justify-between font-medium text-gray-600">
                 <span>Bag Subtotal ({cartItems.length} items)</span>
@@ -412,7 +522,7 @@ export default function CheckoutPage() {
               <span className="text-amber-600">₹{finalPayableAmount.toFixed(2)}</span>
             </div>
 
-            <button 
+            <button
               type="button"
               disabled={loadingOrder}
               onClick={handleRazorpayPayment}

@@ -13,7 +13,19 @@ import Razorpay from 'razorpay';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { PrismaClient, OrderStatus } from '@prisma/client';
-import { sendBrevoEmail } from './lib/email';
+import {
+  sendBrevoEmail,
+  sendRegistrationOtpEmail,
+  sendPasswordResetOtpEmail,
+  sendEmailChangeOtpEmail
+} from './lib/email';
+import {
+  generateSecureOtp,
+  createOtpEntry,
+  verifyStoredOtp,
+  checkResendCooldown,
+  checkRateLimit
+} from './lib/otp';
 import multer from 'multer';
 import crypto from 'crypto';
 import axios from 'axios';
@@ -152,6 +164,10 @@ const verifyToken = (req: AuthenticatedRequest, res: Response, next: NextFunctio
 
   jwt.verify(token, JWT_SECRET, (err, user: any) => {
     if (err) return res.status(403).json({ success: false, error: "Invalid or expired token." });
+    // Guard against token purpose confusion: reset tokens must NEVER authorize standard operations
+    if (user.purpose === 'PASSWORD_RESET' || !user.role) {
+      return res.status(403).json({ success: false, error: "Access Denied: Standard session token required." });
+    }
     req.user = user;
     next();
   });
@@ -185,44 +201,81 @@ app.post('/api/auth/register', async (req, res) => {
       return res.status(400).json({ success: false, error: "Email, password, and full name are required." });
     }
 
-    const cleanEmail = email.trim().toLowerCase();
-    const existingUser = await prisma.user.findUnique({ where: { email: cleanEmail } });
-    if (existingUser && existingUser.isVerified) {
-      return res.status(400).json({ success: false, error: "User with this email already exists. Please log in." });
+    if (password.length < 6) {
+      return res.status(400).json({ success: false, error: "Password must be at least 6 characters long." });
     }
 
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
-    const otpExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    const cleanEmail = email.trim().toLowerCase();
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(cleanEmail)) {
+      return res.status(400).json({ success: false, error: "Please enter a valid email address." });
+    }
 
-    await prisma.user.upsert({
-      where: { email: cleanEmail },
-      update: { passwordHash: hashedPassword, fullName: fullName.trim(), phone: phone ? phone.trim() : null, otpCode, otpExpiresAt, role: role || "CUSTOMER" },
-      create: { email: cleanEmail, passwordHash: hashedPassword, fullName: fullName.trim(), phone: phone ? phone.trim() : null, otpCode, otpExpiresAt, role: role || "CUSTOMER", isVerified: false }
-    });
-
-    console.log(`[AUTH REGISTER] Generated OTP for ${cleanEmail}: ${otpCode}`);
-
-    const emailRes = await sendBrevoEmail({
-      toEmail: cleanEmail,
-      toName: fullName.trim(),
-      subject: "Verify Your Email — Track Hub Sports",
-      htmlContent: `<h2>Hello ${fullName.trim()},</h2><p>Your verification OTP is: <b>${otpCode}</b>. It expires in 10 minutes.</p>`
-    });
-
-    if (!emailRes.success) {
-      console.warn(`[AUTH] Brevo delivery failed for ${cleanEmail}:`, emailRes.error);
-      return res.json({
-        success: true,
-        message: "Registration initiated! Verification code generated.",
-        emailDelivered: false,
-        otp: otpCode
+    const ip = req.ip || req.socket.remoteAddress || 'unknown';
+    const rateCheck = checkRateLimit(`reg_ip_${ip}`, 5, 15);
+    if (!rateCheck.allowed) {
+      return res.status(429).json({
+        success: false,
+        error: `Too many registration attempts. Please try again in ${rateCheck.retryAfterSeconds} seconds.`
       });
     }
 
-    res.json({ success: true, message: "OTP sent to your email. Please verify to complete registration.", emailDelivered: true });
+    const existingUser = await prisma.user.findUnique({ where: { email: cleanEmail } });
+    if (existingUser && existingUser.isVerified) {
+      return res.status(400).json({ success: false, error: "An account with this email already exists. Please sign in or reset your password." });
+    }
+
+    // Cooldown check if re-registering an unverified account
+    if (existingUser && !existingUser.isVerified) {
+      const cooldown = checkResendCooldown(existingUser.otpCode, 60);
+      if (!cooldown.canResend) {
+        return res.status(429).json({
+          success: false,
+          error: `Please wait ${cooldown.waitSeconds} seconds before requesting a new verification code.`
+        });
+      }
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const otpCode = generateSecureOtp();
+    const { serialized, expiresAt } = createOtpEntry(cleanEmail, otpCode, 'REGISTRATION');
+
+    await prisma.user.upsert({
+      where: { email: cleanEmail },
+      update: {
+        passwordHash: hashedPassword,
+        fullName: fullName.trim(),
+        phone: phone ? phone.trim() : null,
+        otpCode: serialized,
+        otpExpiresAt: expiresAt,
+        role: role || "CUSTOMER"
+      },
+      create: {
+        email: cleanEmail,
+        passwordHash: hashedPassword,
+        fullName: fullName.trim(),
+        phone: phone ? phone.trim() : null,
+        otpCode: serialized,
+        otpExpiresAt: expiresAt,
+        role: role || "CUSTOMER",
+        isVerified: false
+      }
+    });
+
+    const emailRes = await sendRegistrationOtpEmail(cleanEmail, fullName.trim(), otpCode);
+    if (!emailRes.success) {
+      return res.status(503).json({
+        success: false,
+        error: "Unable to dispatch verification email at this moment. Please check your email address or try again shortly."
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "A verification code has been dispatched to your email. Please verify to complete registration."
+    });
   } catch (error: any) {
-    res.status(500).json({ success: false, error: error.message });
+    res.status(500).json({ success: false, error: "An error occurred while creating your account. Please try again." });
   }
 });
 
@@ -233,45 +286,51 @@ app.post('/api/auth/resend-otp', async (req, res) => {
       return res.status(400).json({ success: false, error: "Email is required." });
     }
     const cleanEmail = email.trim().toLowerCase();
-    const user = await prisma.user.findUnique({ where: { email: cleanEmail } });
-    if (!user) {
-      return res.status(404).json({ success: false, error: "User with this email not found." });
-    }
+    const ip = req.ip || req.socket.remoteAddress || 'unknown';
 
-    if (user.isVerified) {
-      return res.status(400).json({ success: false, error: "Email is already verified. Please sign in." });
-    }
-
-    const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
-    const otpExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
-
-    await prisma.user.update({
-      where: { email: cleanEmail },
-      data: { otpCode, otpExpiresAt }
-    });
-
-    console.log(`[AUTH RESEND OTP] Generated new OTP for ${cleanEmail}: ${otpCode}`);
-
-    const emailRes = await sendBrevoEmail({
-      toEmail: cleanEmail,
-      toName: user.fullName || "Valued Customer",
-      subject: "Your New Verification OTP — Track Hub Sports",
-      htmlContent: `<h2>Hello ${user.fullName || 'Valued Customer'},</h2><p>Your new verification OTP is: <b>${otpCode}</b>. It expires in 10 minutes.</p>`
-    });
-
-    if (!emailRes.success) {
-      console.warn(`[AUTH] Resend OTP email delivery failed for ${cleanEmail}:`, emailRes.error);
-      return res.json({
-        success: true,
-        message: "New verification code generated.",
-        emailDelivered: false,
-        otp: otpCode
+    const rateCheck = checkRateLimit(`resend_ip_${ip}_${cleanEmail}`, 5, 15);
+    const accountResendCheck = checkRateLimit(`resend_account_${cleanEmail}`, 3, 15);
+    if (!rateCheck.allowed || !accountResendCheck.allowed) {
+      const waitTime = rateCheck.retryAfterSeconds || accountResendCheck.retryAfterSeconds;
+      return res.status(429).json({
+        success: false,
+        error: `Too many verification requests. Please wait ${waitTime} seconds before trying again.`
       });
     }
 
-    res.json({ success: true, message: "A new OTP has been sent to your email.", emailDelivered: true });
+    const user = await prisma.user.findUnique({ where: { email: cleanEmail } });
+    if (!user || user.isVerified) {
+      // Generic response to prevent account enumeration
+      return res.json({ success: true, message: "If your account is pending verification, a new code has been dispatched." });
+    }
+
+    const cooldown = checkResendCooldown(user.otpCode, 60);
+    if (!cooldown.canResend) {
+      return res.status(429).json({
+        success: false,
+        error: `Please wait ${cooldown.waitSeconds} seconds before requesting a new code.`
+      });
+    }
+
+    const otpCode = generateSecureOtp();
+    const { serialized, expiresAt } = createOtpEntry(cleanEmail, otpCode, 'REGISTRATION');
+
+    await prisma.user.update({
+      where: { email: cleanEmail },
+      data: { otpCode: serialized, otpExpiresAt: expiresAt }
+    });
+
+    const emailRes = await sendRegistrationOtpEmail(cleanEmail, user.fullName || "Customer", otpCode);
+    if (!emailRes.success) {
+      return res.status(503).json({
+        success: false,
+        error: "Unable to dispatch verification email at this moment. Please try again shortly."
+      });
+    }
+
+    res.json({ success: true, message: "A new verification code has been sent to your email." });
   } catch (error: any) {
-    res.status(500).json({ success: false, error: error.message });
+    res.status(500).json({ success: false, error: "An error occurred while resending verification code." });
   }
 });
 
@@ -279,15 +338,37 @@ app.post('/api/auth/verify-otp', async (req, res) => {
   try {
     const { email, otp } = req.body;
     if (!email || !otp) {
-      return res.status(400).json({ success: false, error: "Email and OTP are required." });
+      return res.status(400).json({ success: false, error: "Email and verification code are required." });
     }
 
     const cleanEmail = email.trim().toLowerCase();
-    const cleanOtp = String(otp).trim();
+    const accountRate = checkRateLimit(`verify_account_${cleanEmail}`, 10, 15);
+    if (!accountRate.allowed) {
+      return res.status(429).json({
+        success: false,
+        error: `Too many verification attempts for this account. Please try again in ${accountRate.retryAfterSeconds} seconds.`
+      });
+    }
     const user = await prisma.user.findUnique({ where: { email: cleanEmail } });
 
-    if (!user || user.otpCode !== cleanOtp || !user.otpExpiresAt || user.otpExpiresAt < new Date()) {
-      return res.status(400).json({ success: false, error: "Invalid or expired OTP." });
+    if (!user) {
+      return res.status(400).json({ success: false, error: "Invalid verification code or account not found." });
+    }
+
+    if (user.isVerified) {
+      return res.json({ success: true, message: "Account is already verified. You may sign in." });
+    }
+
+    const result = verifyStoredOtp(user.otpCode, user.otpExpiresAt, otp, cleanEmail, 'REGISTRATION');
+
+    if (!result.valid) {
+      if (result.updatedRaw !== undefined) {
+        await prisma.user.update({
+          where: { email: cleanEmail },
+          data: { otpCode: result.updatedRaw }
+        });
+      }
+      return res.status(400).json({ success: false, error: result.error || "Invalid or expired verification code." });
     }
 
     const verifiedUser = await prisma.user.update({
@@ -296,9 +377,14 @@ app.post('/api/auth/verify-otp', async (req, res) => {
     });
 
     const token = jwt.sign({ userId: verifiedUser.id, email: verifiedUser.email, role: verifiedUser.role }, JWT_SECRET, { expiresIn: '7d' });
-    res.json({ success: true, message: "Email verified successfully!", token, user: { id: verifiedUser.id, email: verifiedUser.email, fullName: verifiedUser.fullName, role: verifiedUser.role } });
+    res.json({
+      success: true,
+      message: "Email verified successfully! Welcome to Track Hub Sports.",
+      token,
+      user: { id: verifiedUser.id, email: verifiedUser.email, fullName: verifiedUser.fullName, role: verifiedUser.role }
+    });
   } catch (error: any) {
-    res.status(500).json({ success: false, error: error.message });
+    res.status(500).json({ success: false, error: "Verification processing error." });
   }
 });
 
@@ -310,6 +396,16 @@ app.post('/api/auth/login', async (req, res) => {
     }
 
     const cleanEmail = email.trim().toLowerCase();
+    const ip = req.ip || req.socket.remoteAddress || 'unknown';
+
+    const rateCheck = checkRateLimit(`login_ip_${ip}_${cleanEmail}`, 10, 15);
+    if (!rateCheck.allowed) {
+      return res.status(429).json({
+        success: false,
+        error: `Too many login attempts. Please wait ${rateCheck.retryAfterSeconds} seconds before trying again.`
+      });
+    }
+
     const user = await prisma.user.findUnique({ where: { email: cleanEmail } });
     if (!user || !user.passwordHash) {
       return res.status(400).json({ success: false, error: "Invalid email or password." });
@@ -321,101 +417,536 @@ app.post('/api/auth/login', async (req, res) => {
     }
 
     if (!user.isVerified) {
-      const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
-      const otpExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
-      await prisma.user.update({
-        where: { email: cleanEmail },
-        data: { otpCode, otpExpiresAt }
-      });
-
-      console.log(`[AUTH LOGIN UNVERIFIED] Generated fresh OTP for ${cleanEmail}: ${otpCode}`);
-
-      const emailRes = await sendBrevoEmail({
-        toEmail: cleanEmail,
-        toName: user.fullName || "User",
-        subject: "Verify Your Email — Track Hub Sports",
-        htmlContent: `<h2>Hello ${user.fullName || 'User'},</h2><p>Your verification OTP is: <b>${otpCode}</b>. It expires in 10 minutes.</p>`
-      });
+      const cooldown = checkResendCooldown(user.otpCode, 60);
+      if (cooldown.canResend) {
+        const otpCode = generateSecureOtp();
+        const { serialized, expiresAt } = createOtpEntry(cleanEmail, otpCode, 'REGISTRATION');
+        await prisma.user.update({
+          where: { email: cleanEmail },
+          data: { otpCode: serialized, otpExpiresAt: expiresAt }
+        });
+        await sendRegistrationOtpEmail(cleanEmail, user.fullName || "Customer", otpCode);
+      }
 
       return res.status(403).json({
         success: false,
         requiresVerification: true,
         email: cleanEmail,
-        otp: !emailRes.success ? otpCode : undefined,
-        error: "Please verify your email with OTP before logging in. A new OTP has been generated."
+        error: "Your email address is pending verification. A verification code has been dispatched to your email."
       });
     }
 
     const token = jwt.sign({ userId: user.id, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
-    res.json({ success: true, message: "Logged in successfully!", token, user: { id: user.id, email: user.email, fullName: user.fullName, role: user.role } });
+    res.json({
+      success: true,
+      message: "Logged in successfully!",
+      token,
+      user: { id: user.id, email: user.email, fullName: user.fullName, role: user.role }
+    });
   } catch (error: any) {
-    res.status(500).json({ success: false, error: error.message });
+    res.status(500).json({ success: false, error: "An unexpected authentication error occurred." });
   }
 });
 
+// TASK 2: FORGOT PASSWORD 3-STEP FLOW
 app.post('/api/auth/forgot-password', async (req, res) => {
   try {
     const { email } = req.body;
     if (!email) return res.status(400).json({ success: false, error: "Email is required." });
 
     const cleanEmail = email.trim().toLowerCase();
-    const user = await prisma.user.findUnique({ where: { email: cleanEmail } });
-    if (!user) return res.status(404).json({ success: false, error: "User not found." });
+    const ip = req.ip || req.socket.remoteAddress || 'unknown';
 
-    const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
-    const otpExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
-
-    await prisma.user.update({ where: { email: cleanEmail }, data: { otpCode, otpExpiresAt } });
-
-    console.log(`[AUTH FORGOT PASSWORD] Generated OTP for ${cleanEmail}: ${otpCode}`);
-
-    const emailRes = await sendBrevoEmail({
-      toEmail: cleanEmail,
-      toName: user.fullName,
-      subject: "Password Reset OTP — Track Hub Sports",
-      htmlContent: `<h2>Password Reset Request</h2><p>Your OTP to reset password is: <b>${otpCode}</b></p>`
-    });
-
-    if (!emailRes.success) {
-      console.warn(`[AUTH] Forgot password email delivery failed for ${cleanEmail}:`, emailRes.error);
-      return res.json({
-        success: true,
-        message: "Password reset OTP generated.",
-        emailDelivered: false,
-        otp: otpCode
+    const rateCheck = checkRateLimit(`forgot_ip_${ip}_${cleanEmail}`, 5, 15);
+    if (!rateCheck.allowed) {
+      return res.status(429).json({
+        success: false,
+        error: `Too many password reset requests. Please wait ${rateCheck.retryAfterSeconds} seconds.`
       });
     }
 
-    res.json({ success: true, message: "Password reset OTP sent to email.", emailDelivered: true });
+    const user = await prisma.user.findUnique({ where: { email: cleanEmail } });
+
+    // Prevent account enumeration: Always return identical generic confirmation
+    const genericSuccess = {
+      success: true,
+      message: "If an account is associated with that email, a password reset code has been sent."
+    };
+
+    if (!user) {
+      return res.json(genericSuccess);
+    }
+
+    const cooldown = checkResendCooldown(user.otpCode, 60);
+    if (!cooldown.canResend) {
+      return res.json(genericSuccess);
+    }
+
+    const otpCode = generateSecureOtp();
+    const { serialized, expiresAt } = createOtpEntry(cleanEmail, otpCode, 'PASSWORD_RESET');
+
+    await prisma.user.update({
+      where: { email: cleanEmail },
+      data: { otpCode: serialized, otpExpiresAt: expiresAt }
+    });
+
+    await sendPasswordResetOtpEmail(cleanEmail, user.fullName || "Customer", otpCode);
+    return res.json(genericSuccess);
   } catch (error: any) {
-    res.status(500).json({ success: false, error: error.message });
+    res.status(500).json({ success: false, error: "Unable to process password reset request at this time." });
+  }
+});
+
+app.post('/api/auth/verify-reset-otp', async (req, res) => {
+  try {
+    const { email, otp } = req.body;
+    if (!email || !otp) {
+      return res.status(400).json({ success: false, error: "Email and verification code are required." });
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
+    const accountRate = checkRateLimit(`verify_reset_account_${cleanEmail}`, 10, 15);
+    if (!accountRate.allowed) {
+      return res.status(429).json({
+        success: false,
+        error: `Too many password reset verification attempts. Please wait ${accountRate.retryAfterSeconds} seconds.`
+      });
+    }
+
+    const user = await prisma.user.findUnique({ where: { email: cleanEmail } });
+
+    if (!user) {
+      return res.status(400).json({ success: false, error: "Invalid verification code or account not found." });
+    }
+
+    const result = verifyStoredOtp(user.otpCode, user.otpExpiresAt, otp, cleanEmail, 'PASSWORD_RESET');
+
+    if (!result.valid) {
+      if (result.updatedRaw !== undefined) {
+        await prisma.user.update({
+          where: { email: cleanEmail },
+          data: { otpCode: result.updatedRaw }
+        });
+      }
+      return res.status(400).json({ success: false, error: result.error || "Invalid or expired code." });
+    }
+
+    // Generate single-use cryptographically random nonce for password reset
+    const resetNonce = crypto.randomBytes(16).toString('hex');
+
+    // Invalidate the OTP and store the active reset authorization nonce as a canonical string
+    await prisma.user.update({
+      where: { email: cleanEmail },
+      data: {
+        otpCode: `RESET_NONCE:${resetNonce}`,
+        otpExpiresAt: new Date(Date.now() + 10 * 60 * 1000)
+      }
+    });
+
+    // Issue a short-lived reset authorization token (10 minutes) bound to the nonce
+    const resetToken = jwt.sign(
+      { userId: user.id, email: user.email, nonce: resetNonce, purpose: 'PASSWORD_RESET' },
+      JWT_SECRET,
+      { expiresIn: '10m' }
+    );
+
+    res.json({
+      success: true,
+      message: "Code verified successfully. You may now set your new password.",
+      resetToken
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: "Verification error." });
   }
 });
 
 app.post('/api/auth/reset-password', async (req, res) => {
   try {
-    const { email, otp, newPassword } = req.body;
-    if (!email || !otp || !newPassword) {
-      return res.status(400).json({ success: false, error: "Email, OTP, and new password are required." });
+    const { resetToken, newPassword } = req.body;
+    if (!resetToken || !newPassword) {
+      return res.status(400).json({ success: false, error: "Reset token and new password are required." });
     }
 
-    const cleanEmail = email.trim().toLowerCase();
-    const cleanOtp = String(otp).trim();
-    const user = await prisma.user.findUnique({ where: { email: cleanEmail } });
+    if (newPassword.length < 6) {
+      return res.status(400).json({ success: false, error: "New password must be at least 6 characters long." });
+    }
 
-    if (!user || user.otpCode !== cleanOtp || !user.otpExpiresAt || user.otpExpiresAt < new Date()) {
-      return res.status(400).json({ success: false, error: "Invalid or expired OTP." });
+    let decoded: any;
+    try {
+      decoded = jwt.verify(resetToken, JWT_SECRET);
+    } catch {
+      return res.status(400).json({ success: false, error: "Password reset authorization has expired or is invalid. Please request a new code." });
+    }
+
+    if (decoded?.purpose !== 'PASSWORD_RESET' || !decoded?.userId || !decoded?.nonce) {
+      return res.status(400).json({ success: false, error: "Invalid password reset authorization." });
+    }
+
+    const user = await prisma.user.findUnique({ where: { id: decoded.userId } });
+    if (!user) {
+      return res.status(404).json({ success: false, error: "Account not found." });
     }
 
     const passwordHash = await bcrypt.hash(newPassword, 10);
-    await prisma.user.update({
-      where: { email: cleanEmail },
-      data: { passwordHash, otpCode: null, otpExpiresAt: null, isVerified: true }
+
+    // Atomic conditional consumption: Use updateMany with WHERE id and matching RESET_NONCE.
+    // In PostgreSQL, this single UPDATE statement acquires an exclusive row lock.
+    // Exactly ONE concurrent request can transition the nonce to NULL.
+    const updateResult = await prisma.user.updateMany({
+      where: {
+        id: decoded.userId,
+        otpCode: `RESET_NONCE:${decoded.nonce}`
+      },
+      data: {
+        passwordHash,
+        otpCode: null,
+        otpExpiresAt: null,
+        isVerified: true
+      }
     });
 
-    res.json({ success: true, message: "Password successfully reset. You can now login." });
+    if (updateResult.count === 0) {
+      return res.status(400).json({
+        success: false,
+        error: "This password reset authorization has already been used or has expired. Please request a new code."
+      });
+    }
+
+    res.json({ success: true, message: "Password has been successfully reset. You may now sign in with your new password." });
   } catch (error: any) {
-    res.status(500).json({ success: false, error: error.message });
+    res.status(500).json({ success: false, error: "Password reset processing failed." });
+  }
+});
+
+// TASK 4: REAL GOOGLE AUTHENTICATION ENDPOINT
+app.post('/api/auth/google', async (req, res) => {
+  try {
+    const { credential } = req.body;
+    if (!credential) {
+      return res.status(400).json({ success: false, error: "Google credential token is required." });
+    }
+
+    // Verify token with Google's official public token verification endpoint
+    let payload: any;
+    try {
+      const googleRes = await axios.get(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(credential)}`, { timeout: 8000 });
+      payload = googleRes.data;
+    } catch (gErr: any) {
+      return res.status(401).json({ success: false, error: "Google authentication failed: Invalid or expired token." });
+    }
+
+    const validIssuers = ['accounts.google.com', 'https://accounts.google.com'];
+    if (!payload || !validIssuers.includes(payload.iss)) {
+      return res.status(401).json({ success: false, error: "Google token issuer is invalid." });
+    }
+
+    const configuredClientId = process.env.GOOGLE_CLIENT_ID?.trim();
+    if (configuredClientId && payload.aud !== configuredClientId) {
+      return res.status(401).json({ success: false, error: "Google token audience does not match this application." });
+    }
+
+    if (payload.email_verified !== 'true' && payload.email_verified !== true) {
+      return res.status(400).json({ success: false, error: "Your Google email address is unverified by Google. Please verify it with Google first." });
+    }
+
+    if (!payload.email || !payload.sub) {
+      return res.status(400).json({ success: false, error: "Google identity payload is missing required email or subject ID." });
+    }
+
+    const cleanEmail = String(payload.email).trim().toLowerCase();
+    const googleSub = String(payload.sub).trim();
+    const googleName = String(payload.name || payload.given_name || 'Customer').trim();
+
+    // Atomically execute Google sign-in/account creation inside a Prisma transaction
+    // using PostgreSQL advisory lock to serialize concurrent first-time requests for the same Google sub
+    let user: any;
+    try {
+      user = await prisma.$transaction(async (tx) => {
+        // Transaction-level advisory lock on the Google subject ID (hashed to 32-bit int)
+        // Automatically released when the transaction commits or aborts
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'GOOGLE_SUB:' + googleSub}))`;
+
+        const existingWithSub = await tx.user.findFirst({
+          where: { passwordHash: `GOOGLE_OAUTH:${googleSub}` }
+        });
+
+        let foundUser = await tx.user.findUnique({ where: { email: cleanEmail } });
+
+        // Provider 1-to-1 Mapping: If sub is already linked to another account, reject immediately
+        if (existingWithSub && (!foundUser || existingWithSub.id !== foundUser.id)) {
+          const err: any = new Error("This Google identity is already associated with another account.");
+          err.statusCode = 400;
+          throw err;
+        }
+
+        if (foundUser) {
+          // Role policy: Prohibit Google OAuth from authenticating or elevating to staff/admin roles
+          if (foundUser.role !== 'CUSTOMER') {
+            const err: any = new Error("Staff and administrative accounts must authenticate directly using credentials.");
+            err.statusCode = 403;
+            throw err;
+          }
+
+          // Existing Account Policy: Do NOT silently merge accounts registered with password authentication
+          if (foundUser.passwordHash && !foundUser.passwordHash.startsWith('GOOGLE_OAUTH:')) {
+            const err: any = new Error("An account with this email already exists using password authentication. Please sign in with your email and password.");
+            err.statusCode = 400;
+            throw err;
+          }
+
+          // If user registered with Google previously, verify sub matches
+          if (foundUser.passwordHash && foundUser.passwordHash.startsWith('GOOGLE_OAUTH:')) {
+            const storedSub = foundUser.passwordHash.replace('GOOGLE_OAUTH:', '');
+            if (storedSub !== googleSub) {
+              const err: any = new Error("Google identity mismatch for this email address.");
+              err.statusCode = 400;
+              throw err;
+            }
+          }
+
+          // If account was unverified or had no password set, link it securely to this Google sub
+          if (!foundUser.isVerified || !foundUser.passwordHash) {
+            foundUser = await tx.user.update({
+              where: { id: foundUser.id },
+              data: {
+                passwordHash: `GOOGLE_OAUTH:${googleSub}`,
+                isVerified: true,
+                otpCode: null,
+                otpExpiresAt: null
+              }
+            });
+          }
+
+          return foundUser;
+        } else {
+          // Create new customer account within the advisory-locked transaction
+          return tx.user.create({
+            data: {
+              email: cleanEmail,
+              fullName: googleName,
+              role: 'CUSTOMER',
+              isVerified: true,
+              passwordHash: `GOOGLE_OAUTH:${googleSub}`
+            }
+          });
+        }
+      });
+    } catch (gTxErr: any) {
+      if (gTxErr.statusCode) {
+        return res.status(gTxErr.statusCode).json({ success: false, error: gTxErr.message });
+      }
+      if (gTxErr.code === 'P2002') {
+        // In case of unique constraint race, fetch the existing record
+        user = await prisma.user.findUnique({ where: { email: cleanEmail } });
+        if (!user) {
+          return res.status(500).json({ success: false, error: "Google authentication account resolution error." });
+        }
+      } else {
+        throw gTxErr;
+      }
+    }
+
+    const token = jwt.sign(
+      { userId: user.id, email: user.email, role: user.role },
+      JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    res.json({
+      success: true,
+      message: "Successfully signed in with Google!",
+      token,
+      user: { id: user.id, email: user.email, fullName: user.fullName, role: user.role }
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: "Google authentication processing error." });
+  }
+});
+
+// TASK 3: CHANGE EMAIL ENDPOINTS
+app.post('/api/customer/request-email-change', verifyToken, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { currentPassword, newEmail } = req.body;
+    if (!newEmail) {
+      return res.status(400).json({ success: false, error: "New email address is required." });
+    }
+
+    const cleanNewEmail = String(newEmail).trim().toLowerCase();
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(cleanNewEmail)) {
+      return res.status(400).json({ success: false, error: "Please provide a valid email address format." });
+    }
+
+    const user = await prisma.user.findUnique({ where: { id: req.user!.userId } });
+    if (!user) {
+      return res.status(404).json({ success: false, error: "User account not found." });
+    }
+
+    if (cleanNewEmail === user.email.toLowerCase()) {
+      return res.status(400).json({ success: false, error: "The new email address cannot be the same as your current email address." });
+    }
+
+    // Sensitive change: Re-authentication check
+    if (user.passwordHash && !user.passwordHash.startsWith('GOOGLE_OAUTH:')) {
+      if (!currentPassword) {
+        return res.status(400).json({ success: false, error: "Current password is required to authorize an email change." });
+      }
+      const isMatch = await bcrypt.compare(currentPassword, user.passwordHash);
+      if (!isMatch) {
+        return res.status(401).json({ success: false, error: "Incorrect current password." });
+      }
+    }
+
+    // Check if new email is already taken
+    const existing = await prisma.user.findUnique({ where: { email: cleanNewEmail } });
+    if (existing && existing.id !== user.id) {
+      return res.status(400).json({ success: false, error: "This email address is already associated with another account." });
+    }
+
+    const cooldown = checkResendCooldown(user.otpCode, 60);
+    if (!cooldown.canResend) {
+      return res.status(429).json({
+        success: false,
+        error: `Please wait ${cooldown.waitSeconds} seconds before requesting a new verification code.`
+      });
+    }
+
+    const otpCode = generateSecureOtp();
+    const { serialized, expiresAt } = createOtpEntry(user.email, otpCode, 'EMAIL_CHANGE', { newEmail: cleanNewEmail });
+
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { otpCode: serialized, otpExpiresAt: expiresAt }
+    });
+
+    const emailRes = await sendEmailChangeOtpEmail(cleanNewEmail, user.fullName || "Customer", otpCode);
+    if (!emailRes.success) {
+      return res.status(503).json({
+        success: false,
+        error: "Unable to dispatch verification code to the new email address. Please try again."
+      });
+    }
+
+    res.json({
+      success: true,
+      message: `A verification code has been dispatched to ${cleanNewEmail}. Please enter it to complete the change.`
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: "Failed to initiate email change." });
+  }
+});
+
+app.post('/api/customer/verify-email-change', verifyToken, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { otp } = req.body;
+    if (!otp) {
+      return res.status(400).json({ success: false, error: "Verification code is required." });
+    }
+
+    const user = await prisma.user.findUnique({ where: { id: req.user!.userId } });
+    if (!user) {
+      return res.status(404).json({ success: false, error: "User account not found." });
+    }
+
+    const result = verifyStoredOtp(user.otpCode, user.otpExpiresAt, otp, user.email, 'EMAIL_CHANGE');
+
+    if (!result.valid) {
+      if (result.updatedRaw !== undefined) {
+        await prisma.user.update({
+          where: { id: user.id },
+          data: { otpCode: result.updatedRaw }
+        });
+      }
+      return res.status(400).json({ success: false, error: result.error || "Invalid or expired verification code." });
+    }
+
+    const targetNewEmail = result.metadata?.newEmail;
+    if (!targetNewEmail) {
+      return res.status(400).json({ success: false, error: "No pending email change request found." });
+    }
+
+    const updatedUser = await prisma.$transaction(async (tx) => {
+      const existing = await tx.user.findUnique({ where: { email: targetNewEmail } });
+      if (existing && existing.id !== user.id) {
+        throw new Error("This email address was recently claimed by another account. Please choose a different address.");
+      }
+
+      return tx.user.update({
+        where: { id: user.id },
+        data: {
+          email: targetNewEmail,
+          isVerified: true,
+          otpCode: null,
+          otpExpiresAt: null
+        }
+      });
+    });
+
+    const token = jwt.sign(
+      { userId: updatedUser.id, email: updatedUser.email, role: updatedUser.role },
+      JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    res.json({
+      success: true,
+      message: "Email address successfully updated!",
+      token,
+      user: {
+        id: updatedUser.id,
+        email: updatedUser.email,
+        fullName: updatedUser.fullName,
+        role: updatedUser.role
+      }
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message || "Failed to update email address." });
+  }
+});
+
+app.post('/api/customer/resend-email-change-otp', verifyToken, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const user = await prisma.user.findUnique({ where: { id: req.user!.userId } });
+    if (!user || !user.otpCode) {
+      return res.status(400).json({ success: false, error: "No pending email change request found." });
+    }
+
+    let parsed: any;
+    try {
+      parsed = JSON.parse(user.otpCode);
+    } catch {
+      parsed = null;
+    }
+
+    if (!parsed || parsed.purpose !== 'EMAIL_CHANGE' || !parsed.metadata?.newEmail) {
+      return res.status(400).json({ success: false, error: "No active email change request found." });
+    }
+
+    const cooldown = checkResendCooldown(user.otpCode, 60);
+    if (!cooldown.canResend) {
+      return res.status(429).json({
+        success: false,
+        error: `Please wait ${cooldown.waitSeconds} seconds before requesting a new code.`
+      });
+    }
+
+    const newEmail = parsed.metadata.newEmail;
+    const otpCode = generateSecureOtp();
+    const { serialized, expiresAt } = createOtpEntry(user.email, otpCode, 'EMAIL_CHANGE', { newEmail });
+
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { otpCode: serialized, otpExpiresAt: expiresAt }
+    });
+
+    const emailRes = await sendEmailChangeOtpEmail(newEmail, user.fullName || "Customer", otpCode);
+    if (!emailRes.success) {
+      return res.status(503).json({ success: false, error: "Unable to dispatch verification email. Please try again shortly." });
+    }
+
+    res.json({ success: true, message: `A new verification code has been dispatched to ${newEmail}.` });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: "Failed to resend verification code." });
   }
 });
 
@@ -468,7 +999,7 @@ app.post('/api/admin/create-account', verifyToken, requireAdminOrSuper, async (r
   try {
     const { email, password, fullName, phone, targetRole } = req.body;
     const hashedPassword = await bcrypt.hash(password || 'TempPass@123', 10);
-    
+
     const newUser = await prisma.user.upsert({
       where: { email },
       update: { fullName, phone, role: targetRole, passwordHash: hashedPassword },
@@ -693,7 +1224,7 @@ app.post('/api/admin/categories', verifyToken, requireAdminOrSuper, async (req: 
 app.post('/api/admin/subcategories', verifyToken, requireAdminOrSuper, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { name, categoryId } = req.body;
-    const subCategory = await prisma.subCategory.create({ 
+    const subCategory = await prisma.subCategory.create({
       data: { name, categoryId },
       include: { category: true }
     });
@@ -945,8 +1476,8 @@ app.put('/api/admin/subcategories/:id', verifyToken, requireAdminOrSuper, async 
   try {
     const { id } = req.params;
     const { name, categoryId } = req.body;
-    const subCategory = await prisma.subCategory.update({ 
-      where: { id }, 
+    const subCategory = await prisma.subCategory.update({
+      where: { id },
       data: { name, categoryId },
       include: { category: true }
     });
@@ -990,9 +1521,9 @@ app.put('/api/admin/coupons/:id', verifyToken, requireAdminOrSuper, async (req: 
   try {
     const { id } = req.params;
     const { code, discountPct } = req.body;
-    const coupon = await prisma.coupon.update({ 
-      where: { id }, 
-      data: { code: code.toUpperCase(), discountPct: Number(discountPct) } 
+    const coupon = await prisma.coupon.update({
+      where: { id },
+      data: { code: code.toUpperCase(), discountPct: Number(discountPct) }
     });
     res.json({ success: true, coupon });
   } catch (error: any) {
@@ -1005,9 +1536,9 @@ app.put('/api/admin/banners/:id', verifyToken, requireAdminOrSuper, async (req: 
   try {
     const { id } = req.params;
     const { title, imageUrl, linkUrl } = req.body;
-    const banner = await prisma.banner.update({ 
-      where: { id }, 
-      data: { title, imageUrl, linkUrl } 
+    const banner = await prisma.banner.update({
+      where: { id },
+      data: { title, imageUrl, linkUrl }
     });
     res.json({ success: true, banner });
   } catch (error: any) {
@@ -1105,7 +1636,7 @@ app.get('/api/vendor/products', verifyToken, requireVendor, async (req: Authenti
   try {
     // If Super Admin or Admin checks, they can see all, but for a strict vendor, filter by vendorId
     const queryFilter = req.user!.role === 'VENDOR' ? { vendorId: req.user!.userId } : {};
-    
+
     const products = await prisma.product.findMany({
       where: queryFilter,
       include: { category: true, subCategory: true },
@@ -1356,7 +1887,10 @@ app.post('/api/payments/verify', verifyToken, async (req: AuthenticatedRequest, 
       .update(payload)
       .digest('hex');
 
-    if (expectedSignature !== razorpay_signature) {
+    const expectedBuf = Buffer.from(expectedSignature, 'utf8');
+    const actualBuf = Buffer.from(String(razorpay_signature), 'utf8');
+
+    if (expectedBuf.length !== actualBuf.length || !crypto.timingSafeEqual(expectedBuf, actualBuf)) {
       return res.status(400).json({
         success: false,
         error: "Invalid payment signature. Verification failed."
@@ -1398,9 +1932,77 @@ app.post('/api/payments/verify', verifyToken, async (req: AuthenticatedRequest, 
       });
     }
 
-    // E. Atomic confirmation & inventory decrement within Prisma transaction
+    // E. Verify payment status directly with Razorpay API
+    try {
+      const rzp = getRazorpayInstance();
+      if (rzp) {
+        const payment = await rzp.payments.fetch(razorpay_payment_id);
+        if (payment) {
+          if (payment.order_id && payment.order_id !== razorpay_order_id) {
+            return res.status(400).json({ success: false, error: "Razorpay payment does not correspond to this order." });
+          }
+          const expectedPaise = Math.round(order.totalAmount * 100);
+          if (Number(payment.amount) !== expectedPaise) {
+            return res.status(400).json({ success: false, error: "Payment amount does not match order total." });
+          }
+          if (payment.currency && payment.currency.toUpperCase() !== 'INR') {
+            return res.status(400).json({ success: false, error: "Payment currency mismatch with expected INR." });
+          }
+          if (payment.status === 'authorized') {
+            const captureResult = await rzp.payments.capture(razorpay_payment_id, payment.amount, 'INR');
+            if (!captureResult || captureResult.status !== 'captured') {
+              return res.status(400).json({
+                success: false,
+                error: `Payment capture failed on Razorpay (status: ${captureResult?.status || 'unknown'}).`
+              });
+            }
+          } else if (payment.status !== 'captured') {
+            return res.status(400).json({ success: false, error: `Payment is not in captured state (status: ${payment.status}).` });
+          }
+        }
+      }
+    } catch (rzpFetchErr: any) {
+      console.warn('[Razorpay API Verification Notice]:', rzpFetchErr?.message || rzpFetchErr);
+    }
+
+    // F. Atomic confirmation & inventory decrement within Prisma transaction
     const confirmedOrder = await prisma.$transaction(async (tx) => {
-      // 1. Decrement stock for all purchased items
+      // 1. Atomically claim the PENDING order using conditional updateMany.
+      // In PostgreSQL, updateMany on a row acquires an exclusive row-level lock.
+      // Exactly ONE concurrent transaction can transition the order status from PENDING to CONFIRMED.
+      const claimResult = await tx.order.updateMany({
+        where: {
+          id: order.id,
+          status: OrderStatus.PENDING
+        },
+        data: {
+          status: OrderStatus.CONFIRMED,
+          paymentId: razorpay_payment_id,
+          paymentMode: 'RAZORPAY',
+          shippingAddress: {
+            ...(order.shippingAddress as object),
+            razorpayPaymentId: razorpay_payment_id,
+            verifiedAt: new Date().toISOString()
+          }
+        }
+      });
+
+      // If count === 0, another concurrent or prior request already claimed the order.
+      // Return the confirmed order without decrementing inventory again.
+      if (claimResult.count === 0) {
+        const existingConfirmed = await tx.order.findUnique({
+          where: { id: order.id },
+          include: {
+            orderItems: { include: { product: true } }
+          }
+        });
+        if (!existingConfirmed) {
+          throw new Error("Order not found during confirmation transaction.");
+        }
+        return existingConfirmed;
+      }
+
+      // 2. Only the single winning transaction that claimed the order decrements product stock
       for (const item of order.orderItems) {
         await tx.product.update({
           where: { id: item.productId },
@@ -1412,23 +2014,11 @@ app.post('/api/payments/verify', verifyToken, async (req: AuthenticatedRequest, 
         });
       }
 
-      // 2. Mark order as CONFIRMED with payment ID
-      return tx.order.update({
+      // 3. Return the confirmed order with products
+      return tx.order.findUniqueOrThrow({
         where: { id: order.id },
-        data: {
-          status: OrderStatus.CONFIRMED,
-          paymentId: razorpay_payment_id,
-          paymentMode: 'RAZORPAY',
-          shippingAddress: {
-            ...(order.shippingAddress as object),
-            razorpayPaymentId: razorpay_payment_id,
-            verifiedAt: new Date().toISOString()
-          }
-        },
         include: {
-          orderItems: {
-            include: { product: true }
-          }
+          orderItems: { include: { product: true } }
         }
       });
     });
@@ -1562,7 +2152,7 @@ app.post('/api/vendor/categories', verifyToken, requireVendor, async (req: Authe
 app.post('/api/vendor/subcategories', verifyToken, requireVendor, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { name, categoryId } = req.body;
-    const subCategory = await prisma.subCategory.create({ 
+    const subCategory = await prisma.subCategory.create({
       data: { name, categoryId },
       include: { category: true }
     });
@@ -1578,7 +2168,7 @@ app.get('/api/vendor/analytics', verifyToken, requireVendor, async (req: Authent
   try {
     const vendorUser = await prisma.user.findUnique({ where: { id: req.user!.userId } });
     // Commission cut percentage agreed upon at agreement/creation (defaults to 10% if not specified)
-    const commissionPct = 10; // Default commission cut percentage (10%) 
+    const commissionPct = 10; // Default commission cut percentage (10%)
 
     // Fetch products belonging to or published by this vendor (or all approved store orders)
     const orders = await prisma.order.findMany({
@@ -1617,7 +2207,7 @@ app.put('/api/vendor/products/:id', verifyToken, requireVendor, async (req: Auth
   try {
     const { id } = req.params;
     const { name, description, price, salePrice, stock, imageUrl, categoryId, subCategoryId } = req.body;
-    
+
     const updatedProduct = await prisma.product.update({
       where: { id },
       data: {
@@ -1658,7 +2248,7 @@ app.get('/api/franchise/inventory', verifyToken, requireFranchise, async (req: A
 app.post('/api/franchise/stock-orders', verifyToken, requireFranchise, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { items, totalAmount, shippingAddress } = req.body; // items: [{ productId, quantity, price }]
-    
+
     const order = await prisma.order.create({
       data: {
         userId: req.user!.userId,
@@ -1700,7 +2290,7 @@ app.get('/api/franchise/stock-orders', verifyToken, requireFranchise, async (req
 app.post('/api/shipping/shiprocket-webhook', async (req, res) => {
   try {
     const { order_id, current_status, shipment_status, awb_code } = req.body;
-    
+
     if (!order_id) {
       return res.status(400).json({ success: false, error: "Order ID missing in webhook payload." });
     }
