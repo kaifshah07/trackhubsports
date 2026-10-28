@@ -640,7 +640,7 @@ app.post('/api/auth/google', async (req, res) => {
       return res.status(401).json({ success: false, error: "Google token issuer is invalid." });
     }
 
-    const configuredClientId = process.env.GOOGLE_CLIENT_ID?.trim();
+    const configuredClientId = (process.env.GOOGLE_CLIENT_ID || process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID)?.trim();
     if (configuredClientId && payload.aud !== configuredClientId) {
       return res.status(401).json({ success: false, error: "Google token audience does not match this application." });
     }
@@ -740,6 +740,9 @@ app.post('/api/auth/google', async (req, res) => {
         user = await prisma.user.findUnique({ where: { email: cleanEmail } });
         if (!user) {
           return res.status(500).json({ success: false, error: "Google authentication account resolution error." });
+        }
+        if (user.role !== 'CUSTOMER') {
+          return res.status(403).json({ success: false, error: "Staff and administrative accounts must authenticate directly using credentials." });
         }
       } else {
         throw gTxErr;

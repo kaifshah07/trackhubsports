@@ -48,6 +48,7 @@ export default function AuthPage() {
   const router = useRouter();
 
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'https://trackhubsports.onrender.com';
+  const cleanApiUrl = apiUrl.replace(/\/+$/, '');
   const googleClientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || '';
 
   // Handle countdowns for resend cooldown and OTP expiry
@@ -98,13 +99,25 @@ export default function AuthPage() {
       setSuccessMessage(null);
 
       try {
-        const res = await fetch(`${apiUrl}/api/auth/google`, {
+        const res = await fetch(`${cleanApiUrl}/api/auth/google`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ credential: response.credential })
         });
 
-        const data = await res.json();
+        let data: any;
+        const contentType = res.headers.get('content-type') || '';
+        if (contentType.includes('application/json')) {
+          data = await res.json();
+        } else {
+          const rawText = await res.text();
+          data = {
+            success: false,
+            error: res.status === 404
+              ? "Google authentication endpoint was not found on the backend service (HTTP 404). Please ensure the backend is deployed with the latest code."
+              : `Server returned HTTP ${res.status}: ${rawText.slice(0, 100) || 'Unexpected response'}`
+          };
+        }
         if (data.success && data.token) {
           localStorage.setItem('token', data.token);
           localStorage.setItem('user', JSON.stringify(data.user));
