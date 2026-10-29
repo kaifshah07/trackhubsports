@@ -1928,11 +1928,18 @@ app.post('/api/payments/verify', verifyToken, async (req: AuthenticatedRequest, 
     }
 
     // C. Idempotency Check — if already verified with this payment ID, return confirmed order safely
-    if (order.status === OrderStatus.CONFIRMED && order.paymentId === razorpay_payment_id) {
+    const storedPaymentId = order.paymentId || (order.shippingAddress as any)?.razorpayPaymentId;
+    if (order.status === OrderStatus.CONFIRMED && storedPaymentId === razorpay_payment_id) {
+      const fullOrder = await prisma.order.findUnique({
+        where: { id: order.id },
+        include: {
+          orderItems: { include: { product: true } }
+        }
+      });
       return res.json({
         success: true,
         message: "Order has already been verified and confirmed.",
-        order
+        order: fullOrder || order
       });
     }
 
@@ -1980,13 +1987,14 @@ app.post('/api/payments/verify', verifyToken, async (req: AuthenticatedRequest, 
 
     // F. Atomic confirmation & inventory decrement within Prisma transaction
     const confirmedOrder = await prisma.$transaction(async (tx) => {
-      // 1. Atomically claim the PENDING order using conditional updateMany.
+      // 1. Atomically claim the unconfirmed order (PENDING or CANCELLED) using conditional updateMany.
       // In PostgreSQL, updateMany on a row acquires an exclusive row-level lock.
-      // Exactly ONE concurrent transaction can transition the order status from PENDING to CONFIRMED.
+      // Exactly ONE concurrent transaction can transition the order status to CONFIRMED.
       const claimResult = await tx.order.updateMany({
         where: {
           id: order.id,
-          status: OrderStatus.PENDING
+          status: { in: [OrderStatus.PENDING, OrderStatus.CANCELLED] },
+          paymentId: null
         },
         data: {
           status: OrderStatus.CONFIRMED,
@@ -2009,8 +2017,8 @@ app.post('/api/payments/verify', verifyToken, async (req: AuthenticatedRequest, 
             orderItems: { include: { product: true } }
           }
         });
-        if (!existingConfirmed) {
-          throw new Error("Order not found during confirmation transaction.");
+        if (!existingConfirmed || existingConfirmed.status !== OrderStatus.CONFIRMED) {
+          throw new Error("Order confirmation transition failed. Please verify with customer support.");
         }
         return existingConfirmed;
       }
@@ -2082,8 +2090,7 @@ app.get('/api/customer/orders', verifyToken, async (req: AuthenticatedRequest, r
   try {
     const orders = await prisma.order.findMany({
       where: {
-        userId: req.user!.userId,
-        status: { not: OrderStatus.CANCELLED }
+        userId: req.user!.userId
       },
       include: {
         orderItems: {
@@ -2104,6 +2111,86 @@ app.get('/api/customer/orders', verifyToken, async (req: AuthenticatedRequest, r
     });
 
     res.json({ success: true, orders });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 4.1 Single Customer Order Detail & Tracking Record
+app.get('/api/customer/orders/:id', verifyToken, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    if (!id) return res.status(400).json({ success: false, error: "Order ID is required." });
+
+    const order = await prisma.order.findUnique({
+      where: { id: id.trim() },
+      include: {
+        orderItems: {
+          include: {
+            product: {
+              select: {
+                id: true,
+                name: true,
+                imageUrl: true,
+                price: true,
+                salePrice: true
+              }
+            }
+          }
+        }
+      }
+    });
+
+    if (!order || order.userId !== req.user!.userId) {
+      return res.status(404).json({ success: false, error: "Order not found." });
+    }
+
+    res.json({ success: true, order });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 4.2 Admin Update Order Status & Delivery Tracking
+app.put('/api/admin/orders/:id/status', verifyToken, requireAdminOrSuper, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { status, courierName, awbCode, trackingUrl, estimatedDelivery } = req.body;
+
+    if (!id) return res.status(400).json({ success: false, error: "Order ID is required." });
+
+    const validStatuses = Object.values(OrderStatus);
+    if (status && !validStatuses.includes(status)) {
+      return res.status(400).json({ success: false, error: `Invalid order status. Allowed: ${validStatuses.join(', ')}` });
+    }
+
+    const existingOrder = await prisma.order.findUnique({ where: { id: id.trim() } });
+    if (!existingOrder) {
+      return res.status(404).json({ success: false, error: "Order not found." });
+    }
+
+    const currentShipping = (existingOrder.shippingAddress as any) || {};
+    const updatedShipping = {
+      ...currentShipping,
+      ...(courierName !== undefined ? { courierName: String(courierName).trim() } : {}),
+      ...(awbCode !== undefined ? { awbCode: String(awbCode).trim() } : {}),
+      ...(trackingUrl !== undefined ? { trackingUrl: String(trackingUrl).trim() } : {}),
+      ...(estimatedDelivery !== undefined ? { estimatedDelivery: String(estimatedDelivery).trim() } : {})
+    };
+
+    const updatedOrder = await prisma.order.update({
+      where: { id: id.trim() },
+      data: {
+        ...(status ? { status } : {}),
+        shippingAddress: updatedShipping
+      },
+      include: {
+        orderItems: { include: { product: true } },
+        user: { select: { fullName: true, email: true } }
+      }
+    });
+
+    res.json({ success: true, message: "Order status & tracking updated successfully.", order: updatedOrder });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
   }

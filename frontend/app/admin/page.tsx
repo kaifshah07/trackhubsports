@@ -2,8 +2,248 @@
 
 import React, { useState, useEffect } from 'react';
 import { 
-  Users, Store, ShoppingBag, Settings, UserCheck, Trash2, Edit3, X, Save, Eye, EyeOff, LayoutDashboard, LogOut, Lock, PackageOpen, PlusCircle, UploadCloud, Layers3, CheckCircle2, AlertCircle
+  Users, Store, ShoppingBag, Settings, UserCheck, Trash2, Edit3, X, Save, Eye, EyeOff, LayoutDashboard, LogOut, Lock, PackageOpen, PlusCircle, UploadCloud, Layers3, CheckCircle2, AlertCircle,
+  Truck, ExternalLink, Calendar, Search, ChevronDown, ChevronUp, Clock, Package
 } from 'lucide-react';
+
+
+interface AdminOrderCardProps {
+  ord: any;
+  apiUrl: string;
+  token: string;
+  onUpdated: () => void;
+}
+
+function AdminOrderCard({ ord, apiUrl, token, onUpdated }: AdminOrderCardProps) {
+  const shipping = (typeof ord.shippingAddress === 'object' && ord.shippingAddress !== null) ? ord.shippingAddress : {};
+  const [status, setStatus] = useState(ord.status || 'CONFIRMED');
+  const [courierName, setCourierName] = useState(shipping.courierName || '');
+  const [awbCode, setAwbCode] = useState(shipping.awbCode || '');
+  const [trackingUrl, setTrackingUrl] = useState(shipping.trackingUrl || '');
+  const [estimatedDelivery, setEstimatedDelivery] = useState(shipping.estimatedDelivery || '');
+  const [updating, setUpdating] = useState(false);
+  const [showItems, setShowItems] = useState(false);
+
+  const handleSave = async (newStatus?: string) => {
+    setUpdating(true);
+    const targetStatus = newStatus || status;
+    try {
+      const res = await fetch(`${apiUrl}/api/admin/orders/${ord.id}/status`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          status: targetStatus,
+          courierName,
+          awbCode,
+          trackingUrl,
+          estimatedDelivery
+        })
+      });
+      const data = await res.json();
+      if (data.success) {
+        if (newStatus) setStatus(newStatus);
+        alert(`Order #${ord.id.slice(-8).toUpperCase()} updated successfully!`);
+        onUpdated();
+      } else {
+        alert(data.error || 'Failed to update order');
+      }
+    } catch (err: any) {
+      alert('Error updating order: ' + err.message);
+    } finally {
+      setUpdating(false);
+    }
+  };
+
+  const statusColor = 
+    status === 'DELIVERED' ? 'bg-emerald-100 text-emerald-800' :
+    status === 'SHIPPED' ? 'bg-blue-100 text-blue-800' :
+    status === 'CONFIRMED' ? 'bg-green-100 text-green-800' :
+    status === 'PENDING' ? 'bg-amber-100 text-amber-800' :
+    'bg-red-100 text-red-800';
+
+  return (
+    <div className="p-5 sm:p-6 rounded-2xl border border-gray-200 bg-gray-50/70 text-xs space-y-4 shadow-2xs hover:shadow-xs transition">
+      {/* Top Header */}
+      <div className="flex flex-wrap justify-between items-center gap-2 border-b border-gray-200 pb-3">
+        <div className="space-y-0.5">
+          <div className="flex items-center gap-2">
+            <span className="font-mono font-black text-slate-900 bg-white px-2 py-0.5 rounded border border-gray-200 text-xs">
+              #THS-{ord.id ? ord.id.slice(-8).toUpperCase() : 'ORD'}
+            </span>
+            <span className={`px-2 py-0.5 rounded uppercase text-[10px] font-black ${statusColor}`}>
+              {status}
+            </span>
+          </div>
+          <p className="text-[11px] text-gray-500 font-medium">
+            Order ID: <span className="font-mono text-gray-700">{ord.id}</span>
+          </p>
+        </div>
+
+        <div className="text-right">
+          <p className="font-black text-slate-900 text-sm">₹{Number(ord.totalAmount).toFixed(2)}</p>
+          <span className="text-[11px] text-gray-400 font-medium">
+            {ord.createdAt ? new Date(ord.createdAt).toLocaleString('en-IN') : 'Recent'}
+          </span>
+        </div>
+      </div>
+
+      {/* Customer & Address Details */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 bg-white p-3.5 rounded-xl border border-gray-200">
+        <div>
+          <span className="text-[10px] uppercase font-bold text-gray-400 tracking-wider block mb-0.5">Customer</span>
+          <p className="font-bold text-slate-900">{ord.user?.fullName || 'Guest Customer'}</p>
+          <p className="text-gray-600 font-medium">{ord.user?.email || 'N/A'}</p>
+          <p className="text-[11px] text-gray-500 mt-1">Payment: <b>{ord.paymentMode || 'Online'}</b></p>
+        </div>
+        <div>
+          <span className="text-[10px] uppercase font-bold text-gray-400 tracking-wider block mb-0.5">Delivery Address</span>
+          {typeof ord.shippingAddress === 'object' && ord.shippingAddress !== null ? (
+            <p className="text-gray-700 leading-relaxed text-[11px]">
+              {ord.shippingAddress.address || 'Street address'}<br />
+              {ord.shippingAddress.city ? `${ord.shippingAddress.city}, ` : ''}{ord.shippingAddress.postalCode || ''}
+              {ord.shippingAddress.phone ? ` | Phone: ${ord.shippingAddress.phone}` : ''}
+            </p>
+          ) : (
+            <p className="text-gray-700 text-[11px]">{String(ord.shippingAddress || 'Address on file')}</p>
+          )}
+        </div>
+      </div>
+
+      {/* Ordered Products Dropdown */}
+      {Array.isArray(ord.orderItems) && ord.orderItems.length > 0 && (
+        <div>
+          <button
+            type="button"
+            onClick={() => setShowItems(!showItems)}
+            className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-700 hover:text-slate-900 cursor-pointer"
+          >
+            <Package className="w-3.5 h-3.5 text-amber-500" />
+            <span>{ord.orderItems.length} Ordered Item{ord.orderItems.length > 1 ? 's' : ''}</span>
+            {showItems ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+          </button>
+
+          {showItems && (
+            <div className="mt-2 divide-y divide-gray-200 border border-gray-200 rounded-xl bg-white p-2.5 space-y-1.5">
+              {ord.orderItems.map((item: any, idx: number) => (
+                <div key={idx} className="flex justify-between items-center py-1.5 text-xs">
+                  <div>
+                    <span className="font-bold text-slate-900">{item.product?.name || 'Athletic Wear'}</span>
+                    <span className="text-gray-500 font-semibold ml-2">x{item.quantity}</span>
+                  </div>
+                  <span className="font-bold text-slate-900">₹{(Number(item.price) * item.quantity).toFixed(2)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Logistics & Tracking Controls */}
+      <div className="bg-amber-50/40 p-4 rounded-xl border border-amber-200/60 space-y-3">
+        <span className="text-[10px] uppercase font-black tracking-wider text-amber-900 flex items-center gap-1.5">
+          <Truck className="w-3.5 h-3.5" /> Order Fulfillment & Live Tracking Update
+        </span>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-2.5">
+          <div>
+            <label className="block text-[10px] font-bold text-gray-600 mb-1">Order Status</label>
+            <select
+              value={status}
+              onChange={(e) => setStatus(e.target.value)}
+              className="w-full p-2 rounded-lg border border-gray-300 text-xs font-bold bg-white text-slate-900 focus:ring-2 focus:ring-amber-400 outline-none"
+            >
+              <option value="PENDING">PENDING</option>
+              <option value="CONFIRMED">CONFIRMED</option>
+              <option value="SHIPPED">SHIPPED</option>
+              <option value="DELIVERED">DELIVERED</option>
+              <option value="CANCELLED">CANCELLED</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-[10px] font-bold text-gray-600 mb-1">Courier Partner</label>
+            <input
+              type="text"
+              placeholder="e.g. BlueDart / Delhivery"
+              value={courierName}
+              onChange={(e) => setCourierName(e.target.value)}
+              className="w-full p-2 rounded-lg border border-gray-300 text-xs font-semibold bg-white text-slate-900 focus:ring-2 focus:ring-amber-400 outline-none"
+            />
+          </div>
+
+          <div>
+            <label className="block text-[10px] font-bold text-gray-600 mb-1">AWB / Tracking Code</label>
+            <input
+              type="text"
+              placeholder="e.g. AWB12345678"
+              value={awbCode}
+              onChange={(e) => setAwbCode(e.target.value)}
+              className="w-full p-2 rounded-lg border border-gray-300 text-xs font-semibold bg-white text-slate-900 font-mono focus:ring-2 focus:ring-amber-400 outline-none"
+            />
+          </div>
+
+          <div>
+            <label className="block text-[10px] font-bold text-gray-600 mb-1">Estimated Delivery</label>
+            <input
+              type="text"
+              placeholder="e.g. 3-4 Days / Nov 2"
+              value={estimatedDelivery}
+              onChange={(e) => setEstimatedDelivery(e.target.value)}
+              className="w-full p-2 rounded-lg border border-gray-300 text-xs font-semibold bg-white text-slate-900 focus:ring-2 focus:ring-amber-400 outline-none"
+            />
+          </div>
+        </div>
+
+        <div className="flex flex-col sm:flex-row items-center justify-between gap-2 pt-1">
+          <input
+            type="text"
+            placeholder="Courier Tracking URL (optional: https://...)"
+            value={trackingUrl}
+            onChange={(e) => setTrackingUrl(e.target.value)}
+            className="w-full sm:flex-1 p-2 rounded-lg border border-gray-300 text-xs font-semibold bg-white text-slate-900 focus:ring-2 focus:ring-amber-400 outline-none"
+          />
+
+          <div className="flex items-center gap-2 w-full sm:w-auto">
+            {status !== 'SHIPPED' && status !== 'DELIVERED' && status !== 'CANCELLED' && (
+              <button
+                type="button"
+                disabled={updating}
+                onClick={() => handleSave('SHIPPED')}
+                className="px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition disabled:opacity-50 cursor-pointer shadow-2xs whitespace-nowrap"
+              >
+                Dispatch (Shipped)
+              </button>
+            )}
+
+            {status === 'SHIPPED' && (
+              <button
+                type="button"
+                disabled={updating}
+                onClick={() => handleSave('DELIVERED')}
+                className="px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold transition disabled:opacity-50 cursor-pointer shadow-2xs whitespace-nowrap"
+              >
+                Mark Delivered
+              </button>
+            )}
+
+            <button
+              type="button"
+              disabled={updating}
+              onClick={() => handleSave()}
+              className="flex-1 sm:flex-initial px-4 py-2 bg-slate-900 hover:bg-slate-800 text-amber-400 rounded-lg text-xs font-black transition disabled:opacity-50 cursor-pointer shadow-2xs whitespace-nowrap"
+            >
+              {updating ? 'Saving...' : 'Save Logistics'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 
 export default function AdminPage() {
   const [user, setUser] = useState<any>(null);
@@ -12,6 +252,10 @@ export default function AdminPage() {
   const [activeTab, setActiveTab] = useState<'overview' | 'accounts' | 'inquiries' | 'orders' | 'catalog'>('overview');
   const [catalogSubTab, setCatalogSubTab] = useState<'products' | 'categories' | 'subcategories' | 'coupons' | 'banners'>('products');
   const [loading, setLoading] = useState(true);
+
+  // Orders Filter & Search States
+  const [adminOrderSearchQuery, setAdminOrderSearchQuery] = useState('');
+  const [adminOrderFilterStatus, setAdminOrderFilterStatus] = useState('ALL');
 
   // Users Management State
   const [allUsers, setAllUsers] = useState<any[]>([]);
@@ -844,21 +1088,85 @@ export default function AdminPage() {
 
         {/* TAB 4: ORDERS */}
         {activeTab === 'orders' && (
-          <div className="bg-white p-8 rounded-3xl shadow-sm border border-gray-200 space-y-4">
-            <h2 className="text-sm font-black uppercase tracking-wider text-slate-900">Customer Orders & Deliveries</h2>
+          <div className="bg-white p-6 sm:p-8 rounded-3xl shadow-sm border border-gray-200 space-y-6">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div>
+                <h2 className="text-base font-black uppercase tracking-wider text-slate-900 flex items-center gap-2">
+                  <PackageOpen className="w-5 h-5 text-amber-500" /> Customer Orders & Logistics Management
+                </h2>
+                <p className="text-xs text-gray-500 font-medium mt-0.5">
+                  Update customer order statuses, assign courier partners, and attach AWB tracking codes.
+                </p>
+              </div>
+
+              {/* Status Filter Chips */}
+              <div className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0">
+                {['ALL', 'PENDING', 'CONFIRMED', 'SHIPPED', 'DELIVERED', 'CANCELLED'].map((st) => (
+                  <button
+                    key={st}
+                    onClick={() => setAdminOrderFilterStatus(st)}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-bold transition whitespace-nowrap cursor-pointer ${
+                      adminOrderFilterStatus === st
+                        ? 'bg-slate-900 text-amber-400 shadow-xs'
+                        : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                    }`}
+                  >
+                    {st}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Search Bar */}
+            <div className="relative">
+              <Search className="w-4 h-4 text-gray-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                type="text"
+                placeholder="Search by Order ID, Customer Name, Email, or AWB tracking code..."
+                value={adminOrderSearchQuery}
+                onChange={(e) => setAdminOrderSearchQuery(e.target.value)}
+                className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-gray-200 bg-gray-50/70 text-xs font-semibold text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:bg-white transition"
+              />
+              {adminOrderSearchQuery && (
+                <button
+                  onClick={() => setAdminOrderSearchQuery('')}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 text-xs font-bold"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+
+            {/* Orders Listing */}
             {!dashboardData?.orders || dashboardData.orders.length === 0 ? (
-              <p className="text-xs text-gray-500">No customer orders placed yet.</p>
+              <div className="p-8 text-center bg-gray-50 rounded-2xl border border-gray-200 text-gray-500 text-xs">
+                No customer orders placed yet.
+              </div>
             ) : (
-              dashboardData.orders.map((ord: any) => (
-                <div key={ord.id} className="p-5 rounded-2xl border border-gray-200 bg-gray-50 text-xs space-y-2">
-                  <div className="flex justify-between font-bold text-slate-900">
-                    <span>Order ID: {ord.id}</span>
-                    <span className="px-2 py-0.5 rounded bg-blue-100 text-blue-800 uppercase text-[10px]">{ord.status}</span>
-                  </div>
-                  <p className="text-gray-600">Customer: {ord.user?.fullName} ({ord.user?.email}) | Total Amount: <b className="text-slate-900">₹{ord.totalAmount}</b></p>
-                  <p className="text-[11px] text-gray-500">Payment Mode: {ord.paymentMode} | Date: {new Date(ord.createdAt).toLocaleString()}</p>
-                </div>
-              ))
+              <div className="space-y-4">
+                {dashboardData.orders
+                  .filter((ord: any) => {
+                    if (adminOrderFilterStatus !== 'ALL' && ord.status !== adminOrderFilterStatus) return false;
+                    if (adminOrderSearchQuery.trim()) {
+                      const q = adminOrderSearchQuery.toLowerCase();
+                      const idMatch = (ord.id || '').toLowerCase().includes(q);
+                      const nameMatch = (ord.user?.fullName || '').toLowerCase().includes(q);
+                      const emailMatch = (ord.user?.email || '').toLowerCase().includes(q);
+                      const awbMatch = (ord.shippingAddress?.awbCode || '').toLowerCase().includes(q);
+                      if (!idMatch && !nameMatch && !emailMatch && !awbMatch) return false;
+                    }
+                    return true;
+                  })
+                  .map((ord: any) => (
+                    <AdminOrderCard
+                      key={ord.id}
+                      ord={ord}
+                      apiUrl={apiUrl}
+                      token={token!}
+                      onUpdated={() => fetchAdminDashboardData(token!)}
+                    />
+                  ))}
+              </div>
             )}
           </div>
         )}
